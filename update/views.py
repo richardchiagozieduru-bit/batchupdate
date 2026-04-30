@@ -1,6 +1,7 @@
 import os
 import uuid
 import json
+import logging
 import pandas as pd
 from io import BytesIO
 from django.shortcuts import render, redirect, get_object_or_404
@@ -18,13 +19,16 @@ from openpyxl import load_workbook
 from .models import UploadSession, ColumnMapping, MappingTemplate, Subscriber
 from .services import (
     clean_dataframe,
-    calculate_file_hash, read_uploaded_file, MAX_FILE_SIZE_MB,
+    calculate_file_hash, read_uploaded_file,
+    MAX_EXCEL_FILE_SIZE_MB, MAX_CSV_FILE_SIZE_MB,
     get_excel_sheet_names, read_uploaded_file_sheet,
     generate_sql_script, upload_raw_to_batchupdate,
     detect_header_row, build_sheet_name, get_subscribers_from_batchupdate,
     extract_sub_id,
 )
-from acctmgt.views import _is_external, _require_bound
+from acctmgt.utils import is_external as _is_external, require_bound as _require_bound
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -69,16 +73,19 @@ def upload_view(request):
                 messages.error(request, 'No subscriber assigned. Please contact admin.')
                 return redirect('upload')
             excel_file = request.FILES['excel_file']
-            
-            # P1: File size limit
-            max_size = MAX_FILE_SIZE_MB * 1024 * 1024
-            if excel_file.size > max_size:
-                messages.error(request, f'File too large. Maximum size is {MAX_FILE_SIZE_MB}MB.')
-                return redirect('upload')
-            
+
             # Validate file extension
             if not excel_file.name.endswith(('.xlsx', '.xls', '.csv')):
                 messages.error(request, 'Please upload an Excel or CSV file (.xlsx, .xls, .csv)')
+                return redirect('upload')
+
+            # P1: Type-aware file size limit
+            # Excel: openpyxl loads ~6x the file size into RAM, so a lower cap is enforced.
+            # CSV: streamed in chunks, so a higher cap is safe.
+            is_csv = excel_file.name.endswith('.csv')
+            max_size_mb = MAX_CSV_FILE_SIZE_MB if is_csv else MAX_EXCEL_FILE_SIZE_MB
+            if excel_file.size > max_size_mb * 1024 * 1024:
+                messages.error(request, f'File too large. Maximum size is {max_size_mb} MB for {"CSV" if is_csv else "Excel"} files.')
                 return redirect('upload')
             
             # Save the uploaded file temporarily to read sheets
@@ -109,10 +116,20 @@ def upload_view(request):
                             )
                             break
             except Exception:
-                pass
+                logger.warning("Duplicate detection failed", exc_info=True)
             
-            # Detect sheets
-            sheet_names = get_excel_sheet_names(file_path)
+            # Detect sheets — clean up temp session if the file cannot be read
+            try:
+                sheet_names = get_excel_sheet_names(file_path)
+            except Exception as exc:
+                logger.error(f"Could not read sheets from uploaded file: {exc}", exc_info=True)
+                try:
+                    temp_session.original_file.delete(save=False)
+                    temp_session.delete()
+                except Exception:
+                    pass
+                messages.error(request, 'Could not read the uploaded file. Please ensure it is a valid Excel or CSV file.')
+                return redirect('upload')
             
             if sheet_names is None or len(sheet_names) <= 1:
                 # Single sheet or CSV — use the temp session directly
@@ -138,7 +155,7 @@ def upload_view(request):
                     if first_session.mappings.exists():
                         return redirect('process', session_id=first_session.id)
                 except Exception:
-                    pass
+                    logger.warning(f"Header detection / auto-map failed for session {first_session.id}", exc_info=True)
                 
                 return redirect('mapping', session_id=first_session.id)
             
@@ -185,23 +202,23 @@ def upload_view(request):
                     # Generate SQL script and upload to BatchUpdate
                     _process_sheet_upload(session, sheet_path, sheet_name, df=df)
 
-                    created_sessions.append((session, df))  # store df to avoid re-reading below
+                    # Auto-map immediately while df is in scope, then release it.
+                    # Do NOT accumulate (session, df) tuples — each sheet's df can be
+                    # hundreds of MB; holding all sheets simultaneously exhausts RAM.
+                    try:
+                        _try_auto_map(request, session, df)
+                        if session.mappings.filter(target_column__isnull=False).exclude(target_column='').exists():
+                            session.status = 'processing'
+                            session.save()
+                            async_task('update.tasks.process_file_task', session.id)
+                    except Exception:
+                        logger.warning(f"Auto-map failed for session {session.id}", exc_info=True)
+
+                    created_sessions.append(session)  # only the session; df goes out of scope here
 
                 if not created_sessions:
                     messages.error(request, 'No sheets could be read from the file.')
                     return redirect('upload')
-
-                # Auto-map each session and trigger processing if template matched
-                for sess, df in created_sessions:
-                    try:
-                        _try_auto_map(request, sess, df)  # reuse already-read df — no extra file read
-                        # If a mapping template was applied, kick off processing automatically
-                        if sess.mappings.filter(target_column__isnull=False).exclude(target_column='').exists():
-                            sess.status = 'processing'
-                            sess.save()
-                            async_task('update.tasks.process_file_task', sess.id)
-                    except Exception:
-                        pass
 
                 return redirect('batch', batch_id=batch_id)
 
@@ -274,7 +291,9 @@ def _handle_free_upload(request, excel_files, template_signatures):
     """
     batch_id = uuid.uuid4()
     created_sessions = []
-    max_size = MAX_FILE_SIZE_MB * 1024 * 1024
+    # Free upload mode only accepts Excel (multi-file) or Excel/CSV (single file)
+    max_excel_size = MAX_EXCEL_FILE_SIZE_MB * 1024 * 1024
+    max_csv_size = MAX_CSV_FILE_SIZE_MB * 1024 * 1024
 
     if len(excel_files) > 1:
         # ── Multi-Excel mode ──────────────────────────────────────────────────
@@ -286,8 +305,8 @@ def _handle_free_upload(request, excel_files, template_signatures):
                 messages.warning(request, f'Skipping "{f.name}": filename does not match expected pattern (subid_ddmmyyyy_name).')
                 continue
 
-            if f.size > max_size:
-                messages.warning(request, f'Skipping "{f.name}": file too large (max {MAX_FILE_SIZE_MB} MB).')
+            if f.size > max_excel_size:
+                messages.warning(request, f'Skipping "{f.name}": file too large (max {MAX_EXCEL_FILE_SIZE_MB} MB).')
                 continue
             if not f.name.endswith(('.xlsx', '.xls')):
                 messages.warning(request, f'Skipping "{f.name}": must be .xlsx or .xls in multi-file mode.')
@@ -319,7 +338,7 @@ def _handle_free_upload(request, excel_files, template_signatures):
                             messages.warning(request, f'"{f.name}" appears to be a duplicate of "{existing_session.original_filename}". Proceeding anyway.')
                             break
             except Exception:
-                pass
+                logger.warning("Duplicate detection failed", exc_info=True)
 
             _process_sheet_upload(session, file_path, sheet_name)
 
@@ -334,11 +353,7 @@ def _handle_free_upload(request, excel_files, template_signatures):
                     session.save()
                     async_task('update.tasks.process_file_task', session.id)
             except Exception:
-                pass
-
-            created_sessions.append(session)
-
-        if not created_sessions:
+                logger.warning(f"Header detection / auto-map failed for session {session.id}", exc_info=True)
             messages.error(request, 'No files could be processed. Check that filenames follow the pattern: subid_ddmmyyyy_name.xlsx')
             return redirect('upload')
 
@@ -348,8 +363,9 @@ def _handle_free_upload(request, excel_files, template_signatures):
         # ── Single-file multisheet mode ────────────────────────────────────────
         f = excel_files[0]
 
-        if f.size > max_size:
-            messages.error(request, f'File too large. Maximum size is {MAX_FILE_SIZE_MB} MB.')
+        if f.size > (max_csv_size if f.name.endswith('.csv') else max_excel_size):
+            limit = MAX_CSV_FILE_SIZE_MB if f.name.endswith('.csv') else MAX_EXCEL_FILE_SIZE_MB
+            messages.error(request, f'File too large. Maximum size is {limit} MB.')
             return redirect('upload')
         if not f.name.endswith(('.xlsx', '.xls', '.csv')):
             messages.error(request, 'Please upload an Excel or CSV file (.xlsx, .xls, .csv).')
@@ -364,7 +380,18 @@ def _handle_free_upload(request, excel_files, template_signatures):
         )
         file_path = temp_session.original_file.path
 
-        sheet_names = get_excel_sheet_names(file_path)
+        # Clean up temp session if the file cannot be read
+        try:
+            sheet_names = get_excel_sheet_names(file_path)
+        except Exception as exc:
+            logger.error(f"Could not read sheets from uploaded file: {exc}", exc_info=True)
+            try:
+                temp_session.original_file.delete(save=False)
+                temp_session.delete()
+            except Exception:
+                pass
+            messages.error(request, 'Could not read the uploaded file. Please ensure it is a valid Excel or CSV file.')
+            return redirect('upload')
 
         if sheet_names is None or len(sheet_names) <= 1:
             # Single sheet — subscriber from filename
@@ -391,7 +418,7 @@ def _handle_free_upload(request, excel_files, template_signatures):
                     wb.active.title = sheet_name[:31]  # Excel max sheet name length
                     wb.save(file_path)
                 except Exception:
-                    pass
+                    logger.warning(f"Could not rename sheet tab in {file_path}", exc_info=True)
 
             _process_sheet_upload(temp_session, file_path, sheet_name)
 
@@ -404,7 +431,7 @@ def _handle_free_upload(request, excel_files, template_signatures):
                 if temp_session.mappings.exists():
                     return redirect('process', session_id=temp_session.id)
             except Exception:
-                pass
+                logger.warning(f"Header detection / auto-map failed for session {temp_session.id}", exc_info=True)
 
             return redirect('mapping', session_id=temp_session.id)
 
@@ -458,9 +485,9 @@ def _handle_free_upload(request, excel_files, template_signatures):
                         session.save()
                         async_task('update.tasks.process_file_task', session.id)
                 except Exception:
-                    pass
+                    logger.warning(f"Auto-map failed for session {session.id}", exc_info=True)
 
-                created_sessions.append((session, df))
+                created_sessions.append(session)  # df goes out of scope here
 
             if not created_sessions:
                 messages.error(request, 'No sheets could be processed. Check that sheet tab names follow the pattern: subid_ddmmyyyy_name')

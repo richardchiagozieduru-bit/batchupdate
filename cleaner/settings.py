@@ -4,6 +4,7 @@ Django settings for cleaner project.
 
 from pathlib import Path
 from dotenv import load_dotenv
+from django.core.exceptions import ImproperlyConfigured
 import os
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -13,9 +14,14 @@ load_dotenv(BASE_DIR / '.env')
 
 
 # Quick-start development settings - unsuitable for production
-SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-aur94vy4@nf07$0mq&b)imahjmqyggahdd!t*&g*4job1vj=0a')
+SECRET_KEY = os.getenv('SECRET_KEY')
+if not SECRET_KEY:
+    raise ImproperlyConfigured(
+        "SECRET_KEY environment variable is not set. "
+        "Add it to your .env file or set it in the environment."
+    )
 
-DEBUG = os.getenv('DEBUG', 'True') == 'True'
+DEBUG = os.getenv('DEBUG', 'False') == 'True'
 
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
 
@@ -94,16 +100,28 @@ USE_TZ = True
 
 
 # Static files
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = [BASE_DIR / 'static']
 
 # Media files (uploads)
-MEDIA_URL = 'media/'
+MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# Cache — in-memory per-process (suitable for single-server deployment)
+# Subscriber list is cached for 5 minutes to avoid a SQL Server hit on every page load.
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'dataclean-cache',
+    }
+}
+SUBSCRIBER_CACHE_TTL = 300   # seconds
+SESSION_RETENTION_DAYS = 30  # days before uploaded files and sessions are purged
 
 
 # Login settings
@@ -128,11 +146,12 @@ DEFAULT_FROM_EMAIL = 'no-reply@firstcentral.com'
 Q_CLUSTER = {
     'name': 'DataClean',
     'workers': 2,
-    'timeout': 1800,  # 30 minutes max per task
-    'retry': 1900,
+    'timeout': 1800,      # 30 minutes max per task
+    'retry': 2400,        # retry window = timeout + 600s — prevents thrashing if a task fails near timeout
+    'max_attempts': 1,    # do not automatically retry failed file-processing tasks
     'queue_limit': 50,
-    'orm': 'default',  # Uses Django's default database as broker
-    'save_limit': 250,  # Keep last 250 task results
+    'orm': 'default',     # Uses Django's default database as broker
+    'save_limit': 250,    # Keep last 250 task results
     'catch_up': False,
 }
 

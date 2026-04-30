@@ -141,28 +141,21 @@ def read_uploaded_file(file_path, header=0):
 
 
 # Configuration
-MAX_FILE_SIZE_MB = 500  # Maximum upload size in MB
+# Memory note: openpyxl loads ~6x the file size into RAM when parsing xlsx.
+# Two concurrent Django-Q workers at 50 MB each = ~600 MB RAM just for parsing.
+# Excel files over LARGE_FILE_THRESHOLD_MB are stream-converted to a temp CSV
+# before processing so peak RAM stays flat regardless of file size.
+MAX_EXCEL_FILE_SIZE_MB = 200   # Hard cap for .xlsx / .xls uploads
+MAX_CSV_FILE_SIZE_MB = 500     # Hard cap for .csv uploads
+MAX_FILE_SIZE_MB = max(MAX_EXCEL_FILE_SIZE_MB, MAX_CSV_FILE_SIZE_MB)  # kept for any external references
+LARGE_FILE_THRESHOLD_MB = 50   # xlsx files over this are converted to CSV before processing
+CSV_CHUNK_SIZE = 50_000         # rows per chunk during CSV processing
 
-# Target column definitions with their data types
-NUMERIC_COLUMNS = ['CurrentBalanceAmt', 'overdue_amount', 'months_in_arrears']
-TEXT_COLUMNS = ['loan_classification', 'account_status_code']
-STRING_COLUMNS = ['account_number']
-# Validation rules for numeric columns (max only - negatives stripped during cleaning)
-VALIDATION_RULES = {
-    'CurrentBalanceAmt': {'max': 999999999999},
-    'overdue_amount': {'max': 999999999999},
-    'months_in_arrears': {'max': 9999},
-}
-
-# Display-friendly headers for Excel output
-DISPLAY_HEADERS = {
-    'account_number': 'AccountNo',
-    'CurrentBalanceAmt': 'CurrentBalanceAmt',
-    'overdue_amount': 'AmountOverdue',
-    'months_in_arrears': 'MonthsInArrears',
-    'loan_classification': 'LoanClassification',
-    'account_status_code': 'AccountStatusCode',
-}
+# Target column metadata — single source of truth in update/columns.py
+from .columns import (
+    NUMERIC_COLUMNS, TEXT_COLUMNS, STRING_COLUMNS,
+    VALIDATION_RULES, DISPLAY_HEADERS,
+)
 
 # Value transformation mappings
 ACCOUNT_STATUS_MAP = {
@@ -540,58 +533,68 @@ def save_workbook_atomically(wb, workbook_path):
 
 def format_excel_sheet(ws, display_headers=None):
     """
-    Apply formatting to a worksheet:
-    - Numeric columns: General number format
-    - Text columns: @ text format with string-typed values
-    - Headers: no bold, no border
-    - AccountNo / Account Number: left-aligned
+    Apply formatting to a worksheet in a single row-iteration pass.
+
+    Faster than per-column loops: builds a col_index→format_type map once
+    from the header row, then uses ws.iter_rows() (which yields cells
+    directly) rather than repeated ws.cell(row, col) dict lookups.
+
+    Formats applied:
+    - Numeric columns: 'General' number format
+    - Text columns:    '@' text format + values rewritten as str
+    - AccountNo:       '@' text format + left-aligned
+    - Header row:      bold and border stripped
     """
-    header_row = 1
-    col_map = {}
-    for col_idx, cell in enumerate(ws[header_row], start=1):
-        col_map[cell.value] = col_idx
+    header_row_idx = 1
 
-    # Match both internal and display header names
-    numeric_names = ['CurrentBalanceAmt', 'Current Balance Amount',
-                     'overdue_amount', 'Overdue Amount', 'AmountOverdue',
-                     'months_in_arrears', 'Months In Arrears', 'MonthsInArrears',
-                     'AmountOverdue', 'Monthsinarrears']
-    text_names = ['account_number', 'Account Number', 'AccountNo',
-                  'account_status_code', 'Account Status Code', 'AccountStatusCode',
-                  'loan_classification', 'Loan Classification', 'LoanClassification']
-    account_no_names = ['account_number', 'Account Number', 'AccountNo']
+    numeric_names = frozenset([
+        'CurrentBalanceAmt', 'Current Balance Amount',
+        'overdue_amount', 'Overdue Amount', 'AmountOverdue',
+        'months_in_arrears', 'Months In Arrears', 'MonthsInArrears',
+        'Monthsinarrears',
+    ])
+    text_names = frozenset([
+        'account_number', 'Account Number', 'AccountNo',
+        'account_status_code', 'Account Status Code', 'AccountStatusCode',
+        'loan_classification', 'Loan Classification', 'LoanClassification',
+    ])
+    account_no_names = frozenset(['account_number', 'Account Number', 'AccountNo'])
 
-    # Strip header bold/border
-    for cell in ws[header_row]:
+    # Build col_idx → format_type dict and strip header styling in one header pass
+    col_format = {}  # col_idx (1-based) -> 'numeric' | 'text' | 'account'
+    for cell in ws[header_row_idx]:
+        name = cell.value
+        if name in account_no_names:
+            col_format[cell.column] = 'account'
+        elif name in text_names:
+            col_format[cell.column] = 'text'
+        elif name in numeric_names:
+            col_format[cell.column] = 'numeric'
+        # Strip bold / border from every header cell
         cell.font = Font(
             name=cell.font.name, sz=cell.font.sz, bold=False,
-            italic=cell.font.italic, underline=None, color=cell.font.color
+            italic=cell.font.italic, underline=None, color=cell.font.color,
         )
         cell.border = Border()
 
-    # General format for numeric columns
-    for name in numeric_names:
-        if name in col_map:
-            j = col_map[name]
-            for r in range(2, ws.max_row + 1):
-                ws.cell(row=r, column=j).number_format = 'General'
+    if not col_format or ws.max_row < 2:
+        return
 
-    # Text format for text columns — set format AND re-write value as string
-    for name in text_names:
-        if name in col_map:
-            j = col_map[name]
-            for r in range(2, ws.max_row + 1):
-                cell = ws.cell(row=r, column=j)
+    # Create shared style objects once — reused for every matching cell
+    left_align = Alignment(horizontal='left', vertical='center')
+
+    # Single pass over all data rows; iter_rows yields cells directly (no dict lookup)
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
+        for cell in row:
+            fmt = col_format.get(cell.column)
+            if fmt == 'numeric':
+                cell.number_format = 'General'
+            elif fmt in ('text', 'account'):
                 cell.number_format = '@'
                 if cell.value is not None:
                     cell.value = str(cell.value)
-
-    # Left-align account number
-    for name in account_no_names:
-        if name in col_map:
-            j = col_map[name]
-            for r in range(2, ws.max_row + 1):
-                ws.cell(row=r, column=j).alignment = Alignment(horizontal='left', vertical='center')
+                if fmt == 'account':
+                    cell.alignment = left_align
 
 
 def save_df_to_excel_robust(df, file_path, sheet_name='cleaned', chunk_size=None):
@@ -706,6 +709,48 @@ def read_uploaded_file_sheet(file_path, sheet_name=None, header=0):
                 return pd.read_excel(file_path, sheet_name=sheet_name, dtype=str, engine='xlrd', header=header)
 
 
+def excel_to_csv_streaming(file_path, output_path, sheet_name=None, header_row=0):
+    """
+    Convert an .xlsx file to CSV using openpyxl read_only streaming mode.
+
+    Reads row-by-row without loading the full workbook into RAM, making it
+    safe for files that would otherwise exhaust memory via pd.read_excel().
+
+    Args:
+        file_path:   source .xlsx file path
+        output_path: destination .csv path (will be overwritten if it exists)
+        sheet_name:  sheet to read; None = first/active sheet
+        header_row:  0-based row index of the header; rows before it are skipped
+
+    Returns: output_path
+
+    Note: only .xlsx is supported (openpyxl read_only). Callers must ensure
+    they only call this for .xlsx files; .xls falls back to full pd.read_excel().
+    """
+    import csv as _csv
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+        wb = load_workbook(file_path, read_only=True, data_only=True)
+        try:
+            if sheet_name and sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+            else:
+                ws = wb.active
+
+            with open(output_path, 'w', newline='', encoding='utf-8') as f:
+                writer = _csv.writer(f)
+                for row_idx, row in enumerate(ws.iter_rows(values_only=True)):
+                    if row_idx < header_row:
+                        continue  # skip pre-header rows
+                    writer.writerow(['' if v is None else str(v) for v in row])
+        finally:
+            wb.close()
+
+    logger.info(f"Stream-converted Excel to CSV: {file_path} → {output_path} (skipped {header_row} pre-header rows)")
+    return output_path
+
+
 def extract_sub_id(sheet_name):
     """Extract subscriber ID from sheet name pattern: subid_date_client."""
     parts = str(sheet_name).split('_')
@@ -780,14 +825,27 @@ def get_batchupdate_connection():
 
 def get_subscribers_from_batchupdate():
     """
-    Return live subscriber list from BatchUpdate's Sheet1 table via the unmanaged BatchSubscriber model.
+    Return subscriber list from BatchUpdate's Sheet1 table.
+    Result is cached for SUBSCRIBER_CACHE_TTL seconds (default 5 min) to avoid
+    a SQL Server round-trip on every page load.
     Returns a list of dicts: [{'subscriber_id': int, 'subscriber_name': str}, ...]
     """
+    from django.core.cache import cache
+    from django.conf import settings as _settings
     from .models import BatchSubscriber
-    return [
+
+    cache_key = 'subscribers_list'
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    result = [
         {'subscriber_id': int(row['subscriber_id']), 'subscriber_name': row['subscriber_name']}
         for row in BatchSubscriber.objects.order_by('subscriber_name').values('subscriber_id', 'subscriber_name')
     ]
+    ttl = getattr(_settings, 'SUBSCRIBER_CACHE_TTL', 300)
+    cache.set(cache_key, result, ttl)
+    return result
 
 
 def upload_raw_to_batchupdate(df, table_name):
@@ -796,19 +854,26 @@ def upload_raw_to_batchupdate(df, table_name):
     Table name = sheet name. Columns come from DataFrame headers.
     Drops existing table if present, then creates and bulk-inserts.
     """
+    # SQL types for known display-header column names — defined in columns.py
+    from .columns import COLUMN_SQL_TYPES
+
     conn = get_batchupdate_connection()
     cursor = conn.cursor()
     cursor.fast_executemany = True
 
-    safe_table = table_name.replace("'", "''")
+    # Escape ] as ]] to prevent bracket-identifier injection (both table name and column names)
+    safe_table = table_name.replace("]", "]]").replace("'", "''")
 
     try:
         # Drop table if exists
         cursor.execute(f"IF OBJECT_ID('[{safe_table}]', 'U') IS NOT NULL DROP TABLE [{safe_table}]")
         conn.commit()
 
-        # Build CREATE TABLE with all columns as NVARCHAR(MAX)
-        col_defs = ', '.join(f'[{col}] NVARCHAR(MAX)' for col in df.columns)
+        # Build CREATE TABLE using proper types for known columns, NVARCHAR(255) for others
+        col_defs = ', '.join(
+            f'[{col.replace("]", "]]")}] {COLUMN_SQL_TYPES.get(col, "NVARCHAR(255)")}'
+            for col in df.columns
+        )
         cursor.execute(f"CREATE TABLE [{safe_table}] ({col_defs})")
         conn.commit()
 

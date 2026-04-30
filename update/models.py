@@ -9,6 +9,7 @@ from acctmgt.models import (  # noqa: F401
     SubscriberToken,
     UserSubscriberProfile,
 )
+from .columns import TARGET_COLUMN_CHOICES
 
 
 class UploadSession(models.Model):
@@ -51,18 +52,10 @@ class UploadSession(models.Model):
 
 class ColumnMapping(models.Model):
     """Maps Excel headers to target columns"""
-    TARGET_COLUMNS = [
-        ('account_number', 'AccountNo'),
-        ('CurrentBalanceAmt', 'CurrentBalanceAmt'),
-        ('overdue_amount', 'AmountOverdue'),
-        ('months_in_arrears', 'MonthsInArrears'),
-        ('loan_classification', 'LoanClassification'),
-        ('account_status_code', 'AccountStatusCode'),
-    ]
-    
+
     session = models.ForeignKey(UploadSession, on_delete=models.CASCADE, related_name='mappings')
     original_header = models.CharField(max_length=255)
-    target_column = models.CharField(max_length=50, choices=TARGET_COLUMNS, blank=True)
+    target_column = models.CharField(max_length=50, choices=TARGET_COLUMN_CHOICES, blank=True)
     
     class Meta:
         unique_together = ['session', 'original_header']

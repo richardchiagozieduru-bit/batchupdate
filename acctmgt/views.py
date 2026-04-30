@@ -7,22 +7,16 @@ from django.db import transaction
 from django.views.decorators.cache import never_cache
 
 from .models import Subscriber, SubscriberToken, UserSubscriberProfile
+from .utils import is_external, require_bound, rate_limit
 from update.services import get_subscribers_from_batchupdate
 
-
-def _is_external(user):
-    """Return True if user belongs to the 'external' group."""
-    return user.groups.filter(name='external').exists()
-
-
-def _require_bound(user):
-    """Return True if an external user still needs to redeem a token."""
-    if not _is_external(user):
-        return False
-    return not hasattr(user, 'subscriber_profile')
+# Private aliases kept for any legacy imports
+_is_external = is_external
+_require_bound = require_bound
 
 
 @never_cache
+@rate_limit(max_attempts=5, window=3600)  # 5 registration attempts per hour per IP
 def register_view(request):
     """External user self-registration."""
     if request.user.is_authenticated:
@@ -105,6 +99,7 @@ def redeem_token_view(request):
 
 
 @never_cache
+@rate_limit(max_attempts=10, window=300)  # 10 login attempts per 5 minutes per IP
 def login_view(request):
     """User login page."""
     if request.user.is_authenticated:
