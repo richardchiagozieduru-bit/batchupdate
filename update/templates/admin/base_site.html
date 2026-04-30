@@ -1,0 +1,49 @@
+{% extends "admin/base.html" %}
+
+{% block title %}{{ title }} | Data Cleaner Admin{% endblock %}
+
+{% block extrahead %}{{ block.super }}
+<style>
+/* ── Changelist layout: actions/table left, filters right ── */
+#changelist {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 0;
+}
+
+#changelist-filter {
+    flex: 0 0 200px;
+    order: 2;
+    margin-left: 16px;
+    float: none !important;
+    width: auto !important;
+}
+
+#changelist-form {
+    flex: 1 1 auto;
+    order: 1;
+    float: none !important;
+    width: auto !important;
+    overflow-x: auto;
+}
+
+/* Actions toolbar stays left-aligned */
+.actions {
+    text-align: left;
+}
+
+/* Ensure the content area fills properly */
+#content-main {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* Fix any float leftovers */
+#changelist::after {
+    content: "";
+    display: table;
+    clear: both;
+}
+</style>
+{% endblock %}

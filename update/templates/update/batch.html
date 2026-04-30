@@ -1,0 +1,341 @@
+﻿{% extends 'base.html' %}
+
+{% block title %}Batch Upload &mdash; {{ source_filename }}{% endblock %}
+
+{% block topbar_breadcrumb %}
+<div class="breadcrumb">
+    <a href="{% url 'upload' %}">Upload</a>
+    <span class="sep">/</span>
+    <span style="color:var(--text);">{{ source_filename }}</span>
+</div>
+{% endblock %}
+
+{% block topbar_title %}<div class="page-title">Batch Overview</div>{% endblock %}
+
+{% block topbar_actions %}
+<a href="{% url 'upload' %}" class="btn btn-outline" style="font-size:0.8rem;">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+    Back
+</a>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* File banner */
+    .file-banner {
+        background: white; border: 1px solid var(--border);
+        border-radius: 12px; padding: 1.1rem 1.5rem;
+        display: flex; align-items: center; gap: 1.25rem;
+        margin-bottom: 1.25rem;
+    }
+    .file-banner-icon {
+        width: 44px; height: 44px;
+        background: #eff6ff; border: 1px solid #bae6fd;
+        border-radius: 10px;
+        display: flex; align-items: center; justify-content: center;
+        color: #0284c7; flex-shrink: 0;
+    }
+    .file-banner-title { font-size: 1rem; font-weight: 700; color: var(--text); }
+    .file-banner-sub   { font-size: 0.78rem; color: var(--text-muted); margin-top: 0.15rem; }
+    .file-banner-right { margin-left: auto; display: flex; align-items: center; gap: 0.75rem; }
+
+    /* Stats strip */
+    .stats-strip {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 1rem;
+        margin-bottom: 1.25rem;
+    }
+    .stat-card {
+        background: white; border: 1px solid var(--border);
+        border-radius: 10px; padding: 1rem 1.25rem; text-align: center;
+    }
+    .stat-card .s-value { font-size: 1.5rem; font-weight: 700; color: var(--text); }
+    .stat-card .s-label { font-size: 0.72rem; color: var(--text-muted); margin-top: 0.15rem; }
+
+    /* Progress bar */
+    .progress-wrap {
+        background: white; border: 1px solid var(--border);
+        border-radius: 10px; padding: 1rem 1.25rem;
+        margin-bottom: 1.25rem;
+    }
+    .progress-label {
+        font-size: 0.78rem; color: var(--text-muted); margin-bottom: 0.5rem;
+        display: flex; justify-content: space-between;
+    }
+    .progress-bar-bg {
+        width: 100%; height: 8px; background: #f1f5f9;
+        border-radius: 9999px; overflow: hidden;
+    }
+    .progress-bar-fill {
+        height: 100%; border-radius: 9999px;
+        background: linear-gradient(90deg, #1b3f8f, #f47920);
+        transition: width 0.5s ease;
+    }
+
+    /* Sheet table */
+    .sheet-card {
+        background: white; border: 1px solid var(--border);
+        border-radius: 12px; overflow: hidden;
+        margin-bottom: 1.25rem;
+    }
+    .sheet-card-header {
+        padding: 1rem 1.5rem;
+        border-bottom: 1px solid #f1f5f9;
+        display: flex; align-items: center; justify-content: space-between;
+    }
+    .sheet-card-header h2 {
+        font-size: 0.95rem; font-weight: 600; color: var(--text);
+        display: flex; align-items: center; gap: 0.5rem;
+    }
+
+    .sheet-card table th:first-child,
+    .sheet-card table td:first-child { padding-left: 1.5rem; }
+    .sheet-card table th:last-child,
+    .sheet-card table td:last-child { padding-right: 1.5rem; }
+
+    .action-group { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+    .btn-sm {
+        display: inline-flex; align-items: center; gap: 0.35rem;
+        padding: 0.3rem 0.7rem;
+        font-size: 0.75rem; font-weight: 500;
+        border-radius: 6px; text-decoration: none;
+        border: none; cursor: pointer; color: white;
+        transition: opacity 0.15s;
+    }
+    .btn-sm:hover { opacity: 0.85; }
+    .btn-sm.blue   { background: var(--primary); }
+    .btn-sm.green  { background: var(--success); }
+    .btn-sm.violet { background: #6366f1; }
+    .btn-sm.red    { background: var(--error); }
+    .btn-sm.amber  { background: var(--warning); }
+
+    .db-badge {
+        display: inline-flex; align-items: center; gap: 0.3rem;
+        padding: 0.2rem 0.6rem; border-radius: 9999px;
+        font-size: 0.72rem; font-weight: 600;
+    }
+    .db-yes     { background: rgba(34,197,94,0.12); color: #15803d; }
+    .db-no      { background: rgba(239,68,68,0.12); color: #b91c1c; }
+    .db-pending { background: rgba(245,158,11,0.12); color: #d97706; }
+
+    /* Bulk download strip */
+    .bulk-strip {
+        background: white; border: 1px solid var(--border);
+        border-radius: 10px; padding: 1rem 1.25rem;
+        display: flex; align-items: center; gap: 0.75rem;
+        flex-wrap: wrap;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- File banner -->
+<div class="file-banner">
+    <div class="file-banner-icon">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+    </div>
+    <div>
+        <div class="file-banner-title">{{ source_filename }}</div>
+        <div class="file-banner-sub">{{ sessions|length }} sheet{{ sessions|length|pluralize }} &mdash; multi-sheet batch upload</div>
+    </div>
+    <div class="file-banner-right">
+        {% if sessions|length > 0 %}
+        <a href="{% url 'batch_mapping' batch_id %}" class="btn" style="font-size:0.82rem;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="17" y1="10" x2="3" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="17" y1="18" x2="3" y2="18"/></svg>
+            Map All Sheets
+        </a>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Stats -->
+<div class="stats-strip">
+    <div class="stat-card"><div class="s-value">{{ sessions|length }}</div><div class="s-label">Sheets</div></div>
+    <div class="stat-card"><div class="s-value" id="statScripts">{{ scripts_count }}</div><div class="s-label">SQL Scripts</div></div>
+    <div class="stat-card"><div class="s-value" id="statBU">{{ bu_count }}</div><div class="s-label">In BatchUpdate</div></div>
+    <div class="stat-card"><div class="s-value" id="statUploaded">{{ uploaded_count }}</div><div class="s-label">Fully Uploaded</div></div>
+</div>
+
+<!-- Progress bar -->
+<div class="progress-wrap" id="progressWrap">
+    <div class="progress-label">
+        <span id="progressText">{{ uploaded_count }} of {{ sessions|length }} sheets complete</span>
+        <span id="progressPct">{% widthratio uploaded_count sessions|length 100 %}%</span>
+    </div>
+    <div class="progress-bar-bg">
+        <div class="progress-bar-fill" id="progressFill" style="width:{% widthratio uploaded_count sessions|length 100 %}%;"></div>
+    </div>
+</div>
+
+<!-- Sheet table -->
+<div class="sheet-card">
+    <div class="sheet-card-header">
+        <h2>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+            Individual Sheets
+        </h2>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>Sheet Name</th>
+                <th>Status</th>
+                <th>BatchUpdate</th>
+                <th>Rows</th>
+                {% if not is_external %}<th>Actions</th>{% endif %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for session in sessions %}
+            <tr data-session-id="{{ session.id }}">
+                <td style="font-weight:500;">{{ session.sheet_name }}</td>
+                <td class="js-status">
+                    <span class="status-badge status-{{ session.status }}">
+                        {{ session.get_status_display }}
+                    </span>
+                    {% if session.error_message %}
+                    <div style="font-size:0.72rem;color:#dc2626;margin-top:2px;" title="{{ session.error_message }}">
+                        {{ session.error_message|truncatechars:50 }}
+                    </div>
+                    {% endif %}
+                </td>
+                <td class="js-bu">
+                    {% if session.batchupdate_uploaded %}
+                        <span class="db-badge db-yes">Uploaded</span>
+                    {% elif session.status == 'error' %}
+                        <span class="db-badge db-no">Failed</span>
+                    {% else %}
+                        <span class="db-badge db-pending">Pending</span>
+                    {% endif %}
+                </td>
+                <td class="js-rows" style="font-size:0.85rem;">{{ session.rows_processed }}</td>
+                {% if not is_external %}
+                <td>
+                    <div class="action-group">
+                        {% if session.status == 'pending_mapping' %}
+                            <a href="{% url 'mapping' session.id %}" class="btn-sm blue">Map</a>
+                        {% elif session.status == 'processing' %}
+                            <a href="{% url 'process' session.id %}" class="btn-sm amber">Processing</a>
+                        {% elif session.status in 'processed,uploaded,error' %}
+                            <a href="{% url 'result' session.id %}" class="btn-sm blue">View</a>
+                        {% endif %}
+                        {% if session.processed_file %}
+                            <a href="{% url 'download' session.id %}" class="btn-sm green">Cleaned</a>
+                        {% endif %}
+                        {% if session.rejected_file %}
+                            <a href="{% url 'download_rejected' session.id %}" class="btn-sm amber">Rejected</a>
+                        {% endif %}
+                        {% if session.generated_script %}
+                            <a href="{% url 'download_script' session.id %}" class="btn-sm violet">SQL</a>
+                        {% endif %}
+                        <form action="{% url 'delete_session' session.id %}" method="post" style="display:inline;"
+                              onsubmit="return confirm('Delete session for sheet {{ session.sheet_name }}?');">
+                            {% csrf_token %}
+                            <button type="submit" class="btn-sm red" title="Delete">
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                            </button>
+                        </form>
+                    </div>
+                </td>
+                {% endif %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- Bulk downloads -->
+<div class="bulk-strip">
+    {% if not is_external %}
+    {% if processed_count > 0 %}
+    <a href="{% url 'download_batch_combined' batch_id %}" class="btn btn-success" style="font-size:0.82rem;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Download All Cleaned
+    </a>
+    {% endif %}
+    {% if scripts_count > 0 %}
+    <a href="{% url 'download_batch_scripts_zip' batch_id %}" class="btn btn-accent" style="font-size:0.82rem;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Download All SQL Scripts
+    </a>
+    {% endif %}
+    {% endif %}
+    <a href="{% url 'upload' %}" class="btn btn-outline" style="font-size:0.82rem;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        Upload Another
+    </a>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+  var STATUS_BADGE = {
+    'pending_mapping': {cls: 'status-pending_mapping', label: 'Pending Mapping'},
+    'processing':      {cls: 'status-processing',      label: 'Processing'},
+    'processed':       {cls: 'status-processed',        label: 'Processed'},
+    'uploaded':        {cls: 'status-uploaded',          label: 'Uploaded to SQL'},
+    'error':           {cls: 'status-error',             label: 'Error'}
+  };
+
+  var totalSheets = {{ sessions|length }};
+  var pollTimer = null;
+  var progressUrl = "{% url 'batch_progress' batch_id %}";
+
+  function pollProgress() {
+    fetch(progressUrl)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var buCount = data.sheets.filter(function(s) { return s.batchupdate_uploaded; }).length;
+        var el;
+        el = document.getElementById('statBU'); if (el) el.textContent = buCount;
+        el = document.getElementById('statUploaded'); if (el) el.textContent = data.done;
+
+        var pct = totalSheets > 0 ? Math.round(data.done / totalSheets * 100) : 0;
+        el = document.getElementById('progressFill'); if (el) el.style.width = pct + '%';
+        el = document.getElementById('progressPct');  if (el) el.textContent = pct + '%';
+        el = document.getElementById('progressText'); if (el) el.textContent = data.done + ' of ' + totalSheets + ' sheets complete';
+
+        data.sheets.forEach(function(sheet) {
+          var row = document.querySelector('tr[data-session-id="' + sheet.id + '"]');
+          if (!row) return;
+
+          var statusCell = row.querySelector('.js-status');
+          var info = STATUS_BADGE[sheet.status] || {cls: '', label: sheet.status_display};
+          statusCell.innerHTML = '<span class="status-badge ' + info.cls + '">' + info.label + '</span>';
+          if (sheet.error_message) {
+            statusCell.innerHTML += '<div style="font-size:0.72rem;color:#dc2626;margin-top:2px;" title="' +
+              sheet.error_message.replace(/"/g, '&quot;') + '">' +
+              (sheet.error_message.length > 50 ? sheet.error_message.substring(0,50) + '...' : sheet.error_message) +
+              '</div>';
+          }
+
+          var buCell = row.querySelector('.js-bu');
+          if (sheet.batchupdate_uploaded) {
+            buCell.innerHTML = '<span class="db-badge db-yes">Uploaded</span>';
+          } else if (sheet.status === 'error') {
+            buCell.innerHTML = '<span class="db-badge db-no">Failed</span>';
+          } else {
+            buCell.innerHTML = '<span class="db-badge db-pending">Pending</span>';
+          }
+
+          row.querySelector('.js-rows').textContent = sheet.rows_processed;
+        });
+
+        if (data.all_done) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+      })
+      .catch(function() {});
+  }
+
+  var hasProcessing = {{ has_processing|yesno:"true,false" }};
+  if (hasProcessing) {
+    pollTimer = setInterval(pollProgress, 3000);
+    pollProgress();
+  }
+})();
+</script>
+{% endblock %}

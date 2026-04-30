@@ -1,0 +1,159 @@
+{% extends 'base.html' %}
+
+{% block title %}Processing - Data Cleaner{% endblock %}
+
+{% block extra_css %}
+<style>
+    .progress-container {
+        text-align: center;
+        padding: 3rem 2rem;
+    }
+    
+    .progress-icon {
+        font-size: 4rem;
+        margin-bottom: 1.5rem;
+        animation: pulse 2s infinite;
+    }
+    
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+    }
+    
+    .progress-title {
+        font-size: 1.5rem;
+        margin-bottom: 0.5rem;
+        color: var(--text);
+    }
+    
+    .progress-status {
+        color: var(--text-muted);
+        margin-bottom: 2rem;
+    }
+    
+    .progress-bar-container {
+        background: var(--bg-main);
+        border-radius: 10px;
+        height: 20px;
+        overflow: hidden;
+        margin-bottom: 1rem;
+        border: 1px solid var(--border);
+    }
+    
+    .progress-bar {
+        height: 100%;
+        background: linear-gradient(135deg, var(--primary), var(--accent));
+        border-radius: 10px;
+        transition: width 0.5s ease;
+        width: 0%;
+    }
+    
+    .progress-percent {
+        font-size: 1.25rem;
+        font-weight: 600;
+        color: var(--primary);
+    }
+    
+    .file-info {
+        margin-top: 2rem;
+        padding: 1rem;
+        background: var(--bg-main);
+        border-radius: 8px;
+        border: 1px solid var(--border);
+    }
+    
+    .file-info span {
+        color: var(--text-muted);
+    }
+    
+    .error-message {
+        background: rgba(239, 68, 68, 0.1);
+        border: 1px solid var(--error);
+        color: #dc2626;
+        padding: 1rem;
+        border-radius: 8px;
+        margin-top: 1rem;
+    }
+    
+    .success-icon { color: var(--success); animation: none; }
+    .error-icon { color: var(--error); animation: none; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="progress-container">
+        <div class="progress-icon" id="progressIcon">⏳</div>
+        <h2 class="progress-title" id="progressTitle">Processing Your File</h2>
+        <p class="progress-status" id="progressStatus">Starting...</p>
+        
+        <div class="progress-bar-container">
+            <div class="progress-bar" id="progressBar"></div>
+        </div>
+        <div class="progress-percent" id="progressPercent">0%</div>
+        
+        <div class="file-info">
+            <span>File:</span> {{ session.original_filename }}
+        </div>
+        
+        <div id="errorMessage" class="error-message" style="display: none;"></div>
+        
+        <div id="actionButtons" style="display: none; margin-top: 2rem;">
+            <a href="{% url 'result' session.id %}" class="btn btn-success">View Results →</a>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    const sessionId = {{ session.id }};
+    let pollInterval;
+    
+    function updateProgress(data) {
+        const percent = data.current || 0;
+        const status = data.status || 'Processing...';
+        
+        document.getElementById('progressBar').style.width = percent + '%';
+        document.getElementById('progressPercent').textContent = percent + '%';
+        document.getElementById('progressStatus').textContent = status;
+        
+        if (percent >= 100) {
+            clearInterval(pollInterval);
+            
+            if (data.error) {
+                document.getElementById('progressIcon').textContent = '❌';
+                document.getElementById('progressIcon').className = 'progress-icon error-icon';
+                document.getElementById('progressTitle').textContent = 'Processing Failed';
+                document.getElementById('errorMessage').textContent = status;
+                document.getElementById('errorMessage').style.display = 'block';
+            } else {
+                document.getElementById('progressIcon').textContent = '✅';
+                document.getElementById('progressIcon').className = 'progress-icon success-icon';
+                document.getElementById('progressTitle').textContent = 'Processing Complete!';
+                document.getElementById('actionButtons').style.display = 'block';
+                
+                // Auto-redirect after 2 seconds
+                setTimeout(() => {
+                    window.location.href = "{% url 'result' session.id %}";
+                }, 2000);
+            }
+        }
+    }
+    
+    function pollProgress() {
+        fetch(`/progress/${sessionId}/`)
+            .then(response => response.json())
+            .then(data => {
+                updateProgress(data);
+            })
+            .catch(err => {
+                console.error('Error polling progress:', err);
+            });
+    }
+    
+    // Start polling
+    pollInterval = setInterval(pollProgress, 2000);
+    pollProgress(); // Initial call
+</script>
+{% endblock %}

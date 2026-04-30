@@ -1,0 +1,572 @@
+{% extends 'base.html' %}
+{% load custom_filters %}
+
+{% block title %}Batch Mapping &mdash; {{ source_filename }}{% endblock %}
+
+{% block topbar_breadcrumb %}
+<div class="breadcrumb">
+    <a href="{% url 'upload' %}">Upload</a>
+    <span class="sep">/</span>
+    <a href="{% url 'batch' batch_id %}">{{ source_filename }}</a>
+    <span class="sep">/</span>
+    <span style="color:var(--text);">Map All Sheets</span>
+</div>
+{% endblock %}
+
+{% block topbar_title %}<div class="page-title">Map All Sheets</div>{% endblock %}
+
+{% block topbar_actions %}
+<a href="{% url 'batch' batch_id %}" class="btn btn-outline" style="font-size:0.8rem;">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+    Back to Batch
+</a>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* File banner */
+    .file-banner {
+        background: white; border: 1px solid var(--border);
+        border-radius: 12px; padding: 1.1rem 1.5rem;
+        display: flex; align-items: center; gap: 1.25rem;
+        margin-bottom: 1.25rem;
+    }
+    .file-banner-icon {
+        width: 44px; height: 44px;
+        background: #eff6ff; border: 1px solid #bae6fd;
+        border-radius: 10px;
+        display: flex; align-items: center; justify-content: center;
+        color: #0284c7; flex-shrink: 0;
+    }
+    .file-banner-title { font-size: 1rem; font-weight: 700; color: var(--text); }
+    .file-banner-sub   { font-size: 0.78rem; color: var(--text-muted); margin-top: 0.2rem; }
+    .chips { display: flex; gap: 0.5rem; margin-left: auto; align-items: center; }
+    .chip {
+        padding: 0.25rem 0.7rem; border-radius: 9999px;
+        font-size: 0.72rem; font-weight: 600;
+    }
+    .chip-total   { background: #eff6ff; color: #2563eb; }
+    .chip-pending { background: #fffbeb; color: #d97706; }
+    .chip-done    { background: #f0fdf4; color: #16a34a; }
+
+    /* Two-pane layout */
+    .two-pane {
+        display: grid;
+        grid-template-columns: 260px 1fr;
+        gap: 1.25rem;
+        align-items: start;
+        padding-bottom: 5rem;
+    }
+
+    /* Sheet list sidebar */
+    .sheet-list-card {
+        background: white; border: 1px solid var(--border);
+        border-radius: 12px; overflow: hidden;
+        position: sticky; top: 76px;
+    }
+    .sheet-list-header {
+        padding: 0.85rem 1rem;
+        background: #f8fafc; border-bottom: 1px solid var(--border);
+        font-size: 0.78rem; font-weight: 600;
+        color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .sheet-list { list-style: none; padding: 0; margin: 0; }
+    .sheet-item {
+        display: flex; align-items: center; gap: 0.75rem;
+        padding: 0.85rem 1rem;
+        border-bottom: 1px solid #f1f5f9;
+        cursor: pointer;
+        transition: background 0.15s;
+        border-left: 3px solid transparent;
+    }
+    .sheet-item:last-child { border-bottom: none; }
+    .sheet-item:hover { background: #f8fafc; }
+    .sheet-item.active { background: #eef2fb; border-left-color: #1b3f8f; }
+    .sheet-item.done   { background: #f0fdf4; border-left-color: #22c55e; }
+    .sheet-dot {
+        width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+    }
+    .dot-active  { background: #1b3f8f; }
+    .dot-done    { background: #22c55e; }
+    .dot-pending { background: #f59e0b; }
+    .dot-error   { background: #ef4444; }
+    .sheet-item-name {
+        font-size: 0.83rem; font-weight: 500; color: var(--text);
+        flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .sheet-item-status {
+        font-size: 0.68rem; font-weight: 600;
+        padding: 0.1rem 0.45rem; border-radius: 9999px;
+    }
+    .s-active  { background: #eff6ff; color: #2563eb; }
+    .s-done    { background: #f0fdf4; color: #16a34a; }
+    .s-pending { background: #fffbeb; color: #d97706; }
+    .s-error   { background: #fef2f2; color: #dc2626; }
+    .sheet-mapped-count {
+        font-size: 0.68rem; color: var(--text-muted);
+        margin-top: 0.1rem;
+    }
+
+    /* Mapping panel (right pane) */
+    .mapping-card {
+        background: white; border: 1px solid var(--border);
+        border-radius: 12px; overflow: hidden;
+    }
+    .mapping-card-header {
+        padding: 1rem 1.5rem;
+        border-bottom: 1px solid #f1f5f9;
+        display: flex; align-items: center; justify-content: space-between;
+    }
+    .mapping-card-title {
+        font-size: 0.9rem; font-weight: 600; color: var(--text);
+        display: flex; align-items: center; gap: 0.5rem;
+    }
+    .col-count {
+        font-size: 0.72rem; color: var(--text-muted); font-weight: 400; margin-left: 0.25rem;
+    }
+    .mapped-counter {
+        display: inline-flex; align-items: center; gap: 0.35rem;
+        padding: 0.25rem 0.7rem; border-radius: 9999px;
+        background: #f0fdf4; border: 1px solid #bbf7d0;
+        font-size: 0.75rem; font-weight: 600; color: #16a34a;
+    }
+
+    /* Search bar */
+    .panel-search {
+        padding: 0.75rem 1.25rem;
+        border-bottom: 1px solid #f1f5f9;
+    }
+    .panel-search input {
+        width: 100%;
+        padding: 0.45rem 0.85rem 0.45rem 2.25rem;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        font-size: 0.82rem;
+        background: #f8fafc url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.35-4.35'/%3E%3C/svg%3E") no-repeat 0.75rem center;
+        outline: none; color: var(--text);
+        transition: border-color 0.15s;
+    }
+    .panel-search input:focus { border-color: var(--primary); }
+
+    /* Mapping rows */
+    .mapping-body { max-height: 420px; overflow-y: auto; }
+    .mapping-row {
+        display: flex; align-items: center; gap: 0.75rem;
+        padding: 0.75rem 1.25rem;
+        border-bottom: 1px solid #f8fafc;
+        transition: background 0.1s;
+    }
+    .mapping-row:last-child { border-bottom: none; }
+    .mapping-row:hover { background: #fafafa; }
+    .mapping-row.is-mapped { background: #f0fdf4; }
+    .mapping-row.is-mapped:hover { background: #dcfce7; }
+
+    .source-pill { flex: 1; min-width: 0; }
+    .source-pill-label {
+        font-size: 0.82rem; font-weight: 500; color: var(--text);
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        background: #f8fafc; border: 1px solid var(--border);
+        padding: 0.3rem 0.65rem; border-radius: 6px;
+        display: inline-block; max-width: 100%;
+    }
+    .mapping-row.is-mapped .source-pill-label {
+        background: #dcfce7; border-color: #bbf7d0; color: #166534;
+    }
+
+    .arrow-icon { color: var(--text-muted); flex-shrink: 0; }
+
+    .target-wrap { flex: 1.4; min-width: 0; }
+    .target-select {
+        width: 100%;
+        padding: 0.45rem 0.75rem;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        font-size: 0.82rem; color: var(--text);
+        background: white; cursor: pointer;
+        outline: none;
+        transition: border-color 0.15s;
+    }
+    .target-select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(59,130,246,0.12); }
+    .target-select.mapped {
+        border-color: #22c55e;
+        background: #f0fdf4; color: #166534;
+    }
+
+    .mapped-tick {
+        width: 20px; height: 20px; flex-shrink: 0;
+        display: flex; align-items: center; justify-content: center;
+        border-radius: 50%;
+        background: #22c55e; color: white;
+        opacity: 0;
+        transition: opacity 0.15s;
+    }
+    .mapping-row.is-mapped .mapped-tick { opacity: 1; }
+
+    /* Already done panel */
+    .already-done-panel {
+        padding: 3rem 2rem;
+        text-align: center;
+    }
+    .already-done-icon {
+        width: 56px; height: 56px;
+        background: #f0fdf4; border: 2px solid #bbf7d0;
+        border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        color: #22c55e; margin: 0 auto 1rem;
+    }
+    .already-done-panel h3 { font-size: 0.95rem; font-weight: 600; color: #166534; margin-bottom: 0.35rem; }
+    .already-done-panel p  { font-size: 0.8rem; color: var(--text-muted); }
+
+    /* Error panel */
+    .error-panel {
+        padding: 3rem 2rem;
+        text-align: center;
+    }
+    .error-panel-icon {
+        width: 56px; height: 56px;
+        background: #fef2f2; border: 2px solid #fecaca;
+        border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        color: #ef4444; margin: 0 auto 1rem;
+    }
+    .error-panel h3 { font-size: 0.95rem; font-weight: 600; color: #dc2626; margin-bottom: 0.35rem; }
+    .error-panel p  { font-size: 0.8rem; color: var(--text-muted); }
+
+    /* Save template row */
+    .save-template-row {
+        padding: 0.85rem 1.25rem;
+        border-top: 1px solid #f1f5f9;
+        display: flex; align-items: center; gap: 0.75rem;
+        background: #fafafa;
+    }
+    .save-template-row label {
+        display: flex; align-items: center; gap: 0.6rem;
+        font-size: 0.82rem; color: var(--text); cursor: pointer;
+    }
+    .save-template-row input[type="checkbox"] {
+        width: 15px; height: 15px;
+        accent-color: var(--primary); cursor: pointer;
+    }
+
+    /* Sticky footer */
+    .sticky-footer {
+        position: fixed;
+        bottom: 0; left: var(--sidebar-w); right: 0;
+        background: white;
+        border-top: 1px solid var(--border);
+        padding: 1rem 2rem;
+        display: flex; align-items: center;
+        gap: 1rem;
+        z-index: 30;
+        box-shadow: 0 -4px 16px rgba(0,0,0,0.06);
+    }
+    .footer-summary {
+        font-size: 0.82rem; color: var(--text-muted);
+        display: flex; align-items: center; gap: 1rem;
+    }
+    .footer-summary strong { color: var(--text); }
+    .footer-summary .sep { color: var(--border); }
+    .btn-process {
+        margin-left: auto;
+        display: inline-flex; align-items: center; gap: 0.5rem;
+        padding: 0.7rem 1.75rem;
+        background: var(--primary); color: white;
+        border: none; border-radius: 8px;
+        font-size: 0.9rem; font-weight: 600;
+        cursor: pointer; text-decoration: none;
+        transition: background 0.15s, box-shadow 0.15s;
+    }
+    .btn-process:hover { background: #2563eb; box-shadow: 0 4px 14px rgba(37,99,235,0.35); }
+    .btn-cancel-footer {
+        display: inline-flex; align-items: center; gap: 0.5rem;
+        padding: 0.65rem 1.25rem;
+        background: white; color: var(--text);
+        border: 1px solid var(--border); border-radius: 8px;
+        font-size: 0.85rem; font-weight: 500;
+        cursor: pointer; text-decoration: none;
+        transition: border-color 0.15s;
+    }
+    .btn-cancel-footer:hover { border-color: #94a3b8; }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- File banner -->
+<div class="file-banner">
+    <div class="file-banner-icon">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+    </div>
+    <div>
+        <div class="file-banner-title">{{ source_filename }}</div>
+        <div class="file-banner-sub">Map each sheet's source columns to target fields, then submit all at once</div>
+    </div>
+    <div class="chips">
+        <span class="chip chip-total">{{ sheets_data|length }} sheet{{ sheets_data|length|pluralize }}</span>
+        <span class="chip chip-pending" id="pendingChip">{{ pending_count }} pending</span>
+        <span class="chip chip-done" id="doneChip">{{ done_count }} done</span>
+    </div>
+</div>
+
+<form method="post" id="mappingForm">
+{% csrf_token %}
+
+<!-- Two-pane layout -->
+<div class="two-pane">
+
+    <!-- LEFT: sheet navigator -->
+    <div class="sheet-list-card">
+        <div class="sheet-list-header">Sheets</div>
+        <ul class="sheet-list">
+            {% for sheet in sheets_data %}
+            <li class="sheet-item {% if forloop.first %}active{% endif %} {% if sheet.already_mapped %}done{% endif %}"
+                data-session-id="{{ sheet.session.id }}"
+                data-done="{{ sheet.already_mapped|yesno:'1,0' }}"
+                onclick="switchSheet('{{ sheet.session.id }}', this)">
+                <span class="sheet-dot {% if sheet.already_mapped %}dot-done{% elif sheet.error %}dot-error{% elif forloop.first %}dot-active{% else %}dot-pending{% endif %}"></span>
+                <div style="flex:1;min-width:0;">
+                    <div class="sheet-item-name">{{ sheet.session.sheet_name }}</div>
+                    <div class="sheet-mapped-count" id="sheetInfo_{{ sheet.session.id }}">
+                        {% if sheet.already_mapped %}{{ sheet.session.get_status_display }}{% elif sheet.error %}Error{% else %}0 of {{ sheet.headers|length }} mapped{% endif %}
+                    </div>
+                </div>
+                {% if sheet.already_mapped %}
+                <span class="sheet-item-status s-done">Done</span>
+                {% elif sheet.error %}
+                <span class="sheet-item-status s-error">Error</span>
+                {% else %}
+                <span class="sheet-item-status s-pending" id="sheetStatus_{{ sheet.session.id }}">Pending</span>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+
+    <!-- RIGHT: mapping panels -->
+    <div>
+        {% for sheet in sheets_data %}
+        <div class="sheet-panel" id="panel_{{ sheet.session.id }}"
+             style="{% if not forloop.first %}display:none;{% endif %}">
+
+            {% if sheet.already_mapped %}
+            <div class="mapping-card">
+                <div class="already-done-panel">
+                    <div class="already-done-icon">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+                    </div>
+                    <h3>{{ sheet.session.sheet_name }} &mdash; {{ sheet.session.get_status_display }}</h3>
+                    <p>This sheet has already been mapped and processed.</p>
+                </div>
+            </div>
+
+            {% elif sheet.error %}
+            <div class="mapping-card">
+                <div class="error-panel">
+                    <div class="error-panel-icon">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                    </div>
+                    <h3>Error reading {{ sheet.session.sheet_name }}</h3>
+                    <p>{{ sheet.error }}</p>
+                </div>
+            </div>
+
+            {% else %}
+            <div class="mapping-card">
+                <div class="mapping-card-header">
+                    <div class="mapping-card-title">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="17" y1="10" x2="3" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="17" y1="18" x2="3" y2="18"/></svg>
+                        {{ sheet.session.sheet_name }}
+                        <span class="col-count">({{ sheet.headers|length }} columns)</span>
+                    </div>
+                    <div class="mapped-counter" id="mappedCount_{{ sheet.session.id }}">0 mapped</div>
+                </div>
+
+                <div class="panel-search">
+                    <input type="text" placeholder="Search columns..." oninput="filterColumns(this, '{{ sheet.session.id }}')">
+                </div>
+
+                <div class="mapping-body">
+                    {% for header in sheet.headers %}
+                    <div class="mapping-row {% if sheet.existing_mappings|get:header %}is-mapped{% endif %}"
+                         data-session="{{ sheet.session.id }}"
+                         data-col-name="{{ header|lower }}">
+                        <div class="source-pill">
+                            <span class="source-pill-label" title="{{ header }}">{{ header }}</span>
+                        </div>
+                        <svg class="arrow-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+                        <div class="target-wrap">
+                            <select name="sess_{{ sheet.session.id }}_mapping_{{ header }}"
+                                    class="target-select mapping-select"
+                                    data-session="{{ sheet.session.id }}"
+                                    onchange="handleSelectChange(this)">
+                                <option value="">-- Skip --</option>
+                                {% for key, label in target_columns %}
+                                <option value="{{ key }}"
+                                    {% if sheet.existing_mappings|get:header == key %}selected{% endif %}>
+                                    {{ label }}
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="mapped-tick">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+
+                <div class="save-template-row">
+                    <label>
+                        <input type="checkbox" name="save_template" value="1">
+                        Save these mappings as a template for future uploads
+                    </label>
+                </div>
+            </div>
+            {% endif %}
+
+        </div>
+        {% endfor %}
+    </div>
+
+</div>
+
+</form>
+
+<!-- Sticky footer -->
+<div class="sticky-footer">
+    <div class="footer-summary">
+        <span><strong id="footerPending">{{ pending_count }}</strong> pending</span>
+        <span class="sep">|</span>
+        <span><strong id="footerDone">{{ done_count }}</strong> done</span>
+        <span class="sep">|</span>
+        <span><strong>{{ sheets_data|length }}</strong> total sheets</span>
+    </div>
+    <a href="{% url 'batch' batch_id %}" class="btn-cancel-footer">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+        Cancel
+    </a>
+    <button type="submit" form="mappingForm" class="btn-process">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+        Map &amp; Process All Sheets
+    </button>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+  /* Sheet switching */
+  function switchSheet(sessionId, clickedItem) {
+    document.querySelectorAll('.sheet-panel').forEach(function(p) {
+      p.style.display = 'none';
+    });
+    var panel = document.getElementById('panel_' + sessionId);
+    if (panel) panel.style.display = 'block';
+
+    document.querySelectorAll('.sheet-item').forEach(function(item) {
+      if (!item.dataset.done || item.dataset.done !== '1') {
+        item.classList.remove('active');
+        var dot = item.querySelector('.sheet-dot');
+        if (dot) { dot.classList.remove('dot-active'); dot.classList.add('dot-pending'); }
+      }
+    });
+    if (clickedItem && (!clickedItem.dataset.done || clickedItem.dataset.done !== '1')) {
+      clickedItem.classList.add('active');
+      var dot = clickedItem.querySelector('.sheet-dot');
+      if (dot) { dot.classList.remove('dot-pending'); dot.classList.add('dot-active'); }
+    }
+  }
+  window.switchSheet = switchSheet;
+
+  /* Select change handler */
+  function handleSelectChange(select) {
+    var row = select.closest('.mapping-row');
+    if (select.value) {
+      select.classList.add('mapped');
+      row.classList.add('is-mapped');
+    } else {
+      select.classList.remove('mapped');
+      row.classList.remove('is-mapped');
+    }
+    updateCounts();
+  }
+  window.handleSelectChange = handleSelectChange;
+
+  /* Column search filter */
+  function filterColumns(input, sessionId) {
+    var query = input.value.toLowerCase();
+    var rows = document.querySelectorAll('.mapping-row[data-session="' + sessionId + '"]');
+    rows.forEach(function(row) {
+      var colName = row.getAttribute('data-col-name') || '';
+      row.style.display = colName.indexOf(query) !== -1 ? '' : 'none';
+    });
+  }
+  window.filterColumns = filterColumns;
+
+  /* Count updater */
+  function updateCounts() {
+    var sheetItems = document.querySelectorAll('.sheet-item');
+    var totalPending = 0;
+    var totalDone = 0;
+
+    sheetItems.forEach(function(item) {
+      var sid = item.dataset.sessionId;
+      var isDone = item.dataset.done === '1';
+
+      if (isDone) {
+        totalDone++;
+        return;
+      }
+
+      var selects = document.querySelectorAll('.mapping-select[data-session="' + sid + '"]');
+      var mapped = 0;
+      var total = selects.length;
+      selects.forEach(function(s) { if (s.value) mapped++; });
+
+      var counter = document.getElementById('mappedCount_' + sid);
+      if (counter) counter.textContent = mapped + ' mapped';
+
+      var info = document.getElementById('sheetInfo_' + sid);
+      if (info) info.textContent = mapped + ' of ' + total + ' mapped';
+
+      var statusEl = document.getElementById('sheetStatus_' + sid);
+      if (statusEl) {
+        if (mapped > 0 && mapped >= total) {
+          statusEl.textContent = 'Ready';
+          statusEl.className = 'sheet-item-status s-done';
+        } else if (mapped > 0) {
+          statusEl.textContent = 'Partial';
+          statusEl.className = 'sheet-item-status s-active';
+        } else {
+          statusEl.textContent = 'Pending';
+          statusEl.className = 'sheet-item-status s-pending';
+        }
+      }
+
+      if (mapped > 0) {
+        totalDone++;
+      } else {
+        totalPending++;
+      }
+    });
+
+    var pendingChip = document.getElementById('pendingChip');
+    var doneChip = document.getElementById('doneChip');
+    if (pendingChip) pendingChip.textContent = totalPending + ' pending';
+    if (doneChip) doneChip.textContent = totalDone + ' done';
+
+    var footerPending = document.getElementById('footerPending');
+    var footerDone = document.getElementById('footerDone');
+    if (footerPending) footerPending.textContent = totalPending;
+    if (footerDone) footerDone.textContent = totalDone;
+  }
+
+  /* Init */
+  document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('.mapping-select').forEach(function(select) {
+      if (select.value) select.classList.add('mapped');
+    });
+    updateCounts();
+  });
+})();
+</script>
+{% endblock %}

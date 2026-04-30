@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Data Cleaner{% endblock %}</title>
+    <style>
+        :root {
+            --primary: #1b3f8f;
+            --primary-light: #2b56b8;
+            --accent: #f47920;
+            --bg-main: #f1f5f9;
+            --bg-card: #ffffff;
+            --text: #1e293b;
+            --text-muted: #64748b;
+            --border: #e2e8f0;
+            --success: #22c55e;
+            --error: #ef4444;
+            --warning: #f59e0b;
+            --sidebar-w: 240px;
+        }
+
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: var(--bg-main);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+        }
+
+        /* ── Sidebar ─────────────────────────────────── */
+        .sidebar {
+            width: var(--sidebar-w);
+            min-height: 100vh;
+            background: #0d1f4e;
+            color: #94a3b8;
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+            position: fixed;
+            top: 0; left: 0; bottom: 0;
+            z-index: 40;
+        }
+        .sidebar-logo {
+            padding: 1.25rem 1.25rem 1rem;
+            display: flex; align-items: center; justify-content: center;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+        }
+        .sidebar-logo img { width: 150px; height: auto; display: block; filter: brightness(0) invert(1); }
+        .sidebar-logo .logo-text { font-size: 1rem; font-weight: 600; color: #f1f5f9; line-height: 1.2; }
+        .sidebar-logo .logo-sub  { font-size: 0.7rem; color: #64748b; }
+        .sidebar-section {
+            padding: 1rem 0.75rem 0.5rem;
+            font-size: 0.68rem; text-transform: uppercase;
+            letter-spacing: 0.07em; color: rgba(255,255,255,0.35); font-weight: 600;
+        }
+        .nav-item {
+            display: flex; align-items: center; gap: 0.75rem;
+            padding: 0.6rem 1.25rem;
+            color: rgba(255,255,255,0.6); text-decoration: none; font-size: 0.875rem;
+            transition: background 0.15s, color 0.15s;
+            cursor: pointer; border-left: 3px solid transparent;
+        }
+        .nav-item:hover { background: rgba(255,255,255,0.07); color: #fff; }
+        .nav-item.active { background: rgba(244,121,32,0.15); color: #f47920; border-left-color: #f47920; }
+        .nav-item svg { width: 16px; height: 16px; flex-shrink: 0; }
+        .nav-badge {
+            margin-left: auto; background: #3b82f6; color: white;
+            font-size: 0.65rem; padding: 0.1rem 0.45rem;
+            border-radius: 9999px; font-weight: 600;
+        }
+        .sidebar-footer {
+            margin-top: auto; padding: 1rem 1.25rem;
+            border-top: 1px solid rgba(255,255,255,0.08);
+            display: flex; align-items: center; gap: 0.75rem;
+        }
+        .avatar {
+            width: 32px; height: 32px;
+            background: linear-gradient(135deg, #f47920, #e06010);
+            border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 0.75rem; color: white; font-weight: 600; flex-shrink: 0;
+        }
+        .sidebar-footer .user-info { flex: 1; min-width: 0; }
+        .sidebar-footer .username { font-size: 0.82rem; color: #fff; font-weight: 500; }
+        .sidebar-footer .user-role { font-size: 0.7rem; color: rgba(255,255,255,0.4); }
+        .logout-btn {
+            color: #475569; cursor: pointer; transition: color 0.15s;
+            background: none; border: none; padding: 0; text-decoration: none;
+        }
+        .logout-btn:hover { color: #ef4444; }
+
+        /* ── Main wrapper ────────────────────────────── */
+        .main { margin-left: var(--sidebar-w); flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+
+        /* ── Topbar ──────────────────────────────────── */
+        .topbar {
+            background: white; border-bottom: 1px solid var(--border);
+            padding: 0 2rem; height: 60px;
+            display: flex; align-items: center; gap: 1rem;
+            position: sticky; top: 0; z-index: 20;
+        }
+        .topbar .page-title { font-size: 1rem; font-weight: 600; color: var(--text); }
+        .topbar .breadcrumb { display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; color: #94a3b8; }
+        .topbar .breadcrumb a { color: var(--primary); text-decoration: none; }
+        .topbar .breadcrumb span.sep { color: #cbd5e1; }
+        .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 0.75rem; }
+
+        /* ── Content area ────────────────────────────── */
+        .content { padding: 1.75rem 2rem; flex: 1; }
+
+        /* ── Card ────────────────────────────────────── */
+        .card {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 1.5rem;
+            border: 1px solid var(--border);
+            box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+        }
+
+        /* ── Buttons ─────────────────────────────────── */
+        .btn {
+            display: inline-flex; align-items: center; gap: 0.5rem;
+            padding: 0.6rem 1.25rem;
+            background: var(--primary); color: white;
+            border: none; border-radius: 8px;
+            font-size: 0.875rem; font-weight: 500;
+            cursor: pointer; text-decoration: none;
+            transition: background 0.15s, box-shadow 0.15s;
+        }
+        .btn:hover { background: #152f6e; box-shadow: 0 4px 14px rgba(27,63,143,0.35); }
+        .btn-success { background: var(--success); }
+        .btn-success:hover { background: #16a34a; }
+        .btn-accent { background: var(--accent); }
+        .btn-accent:hover { background: #d96810; }
+        .btn-outline {
+            background: white; color: #374151;
+            border: 1px solid var(--border);
+        }
+        .btn-outline:hover { border-color: #94a3b8; background: white; box-shadow: none; }
+
+        /* ── Forms ────────────────────────────────────── */
+        .form-group { margin-bottom: 1.5rem; }
+        .form-group label { display: block; margin-bottom: 0.5rem; color: var(--text-muted); font-size: 0.9rem; }
+        .form-group input, .form-group select {
+            width: 100%; padding: 0.6rem 0.85rem;
+            background: #f8fafc; border: 1px solid var(--border);
+            border-radius: 8px; color: var(--text); font-size: 0.9rem;
+        }
+        .form-group input:focus, .form-group select:focus {
+            outline: none; border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(59,130,246,0.15);
+        }
+
+        /* ── Alerts ──────────────────────────────────── */
+        .alert { padding: 0.85rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.875rem; }
+        .alert-error { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2); color: #dc2626; }
+        .alert-success { background: rgba(34,197,94,0.08); border: 1px solid rgba(34,197,94,0.2); color: #16a34a; }
+        .alert-warning { background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.2); color: #d97706; }
+
+        /* ── Tables ──────────────────────────────────── */
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 0.75rem 1rem; text-align: left; border-bottom: 1px solid #f1f5f9; }
+        th {
+            color: var(--text-muted); font-weight: 600; font-size: 0.75rem;
+            text-transform: uppercase; letter-spacing: 0.04em;
+            background: #f8fafc;
+        }
+        tr:hover td { background: rgba(59,130,246,0.02); }
+
+        /* ── Status badges ───────────────────────────── */
+        .status-badge {
+            display: inline-flex; align-items: center; gap: 0.35rem;
+            padding: 0.2rem 0.65rem; border-radius: 9999px;
+            font-size: 0.72rem; font-weight: 600;
+        }
+        .status-badge::before {
+            content: ''; width: 6px; height: 6px; border-radius: 50%;
+        }
+        .status-pending_mapping { background: rgba(245,158,11,0.12); color: #d97706; }
+        .status-pending_mapping::before { background: #f59e0b; }
+        .status-processing { background: rgba(59,130,246,0.12); color: #2563eb; }
+        .status-processing::before { background: #3b82f6; animation: pulse-dot 1.5s infinite; }
+        .status-processed { background: rgba(34,197,94,0.12); color: #16a34a; }
+        .status-processed::before { background: #22c55e; }
+        .status-uploaded { background: rgba(99,102,241,0.12); color: #6366f1; }
+        .status-uploaded::before { background: #6366f1; }
+        .status-error { background: rgba(239,68,68,0.12); color: #ef4444; }
+        .status-error::before { background: #ef4444; }
+
+        @keyframes pulse-dot {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        /* ── No-sidebar fallback for login ───────────── */
+        body.no-sidebar { display: block; background: var(--bg-main); }
+        body.no-sidebar .main { margin-left: 0; }
+    </style>
+    {% block extra_css %}{% endblock %}
+</head>
+<body{% if not user.is_authenticated %} class="no-sidebar"{% endif %}>
+
+    {% if user.is_authenticated %}
+    <!-- Sidebar -->
+    <aside class="sidebar">
+        <div class="sidebar-logo">
+            {% load static %}
+            <img src="{% static 'img/logo.png' %}" alt="FirstCentral Credit Bureau">
+        </div>
+        <div class="sidebar-section">Main</div>
+        <a class="nav-item {% block nav_upload %}{% endblock %}" href="{% url 'upload' %}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            Upload
+        </a>
+        <div class="sidebar-footer">
+            <div class="avatar">{{ user.username|make_list|first|upper }}</div>
+            <div class="user-info">
+                <div class="username">{{ user.username }}</div>
+                <div class="user-role">{% if user.is_superuser %}Administrator{% else %}User{% endif %}</div>
+            </div>
+            <a href="{% url 'logout' %}" class="logout-btn" title="Logout">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+            </a>
+        </div>
+    </aside>
+    {% endif %}
+
+    <div class="main">
+        {% if user.is_authenticated %}
+        <header class="topbar">
+            <div>
+                {% block topbar_breadcrumb %}{% endblock %}
+                {% block topbar_title %}<div class="page-title">Data Cleaner</div>{% endblock %}
+            </div>
+            <div class="topbar-right">
+                {% block topbar_actions %}{% endblock %}
+            </div>
+        </header>
+        {% endif %}
+
+        <div class="content">
+            {% if messages %}
+                {% for message in messages %}
+                    <div class="alert alert-{{ message.tags }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+
+            {% block content %}{% endblock %}
+        </div>
+    </div>
+
+    {% block extra_js %}{% endblock %}
+</body>
+</html>

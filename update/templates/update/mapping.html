@@ -1,0 +1,385 @@
+{% extends 'base.html' %}
+{% load custom_filters %}
+
+{% block title %}Map Columns - Data Cleaner{% endblock %}
+
+{% block extra_css %}
+<style>
+  .mapping-container {
+    max-width: 1100px;
+    margin: 2rem auto;
+    padding: 0 1rem;
+  }
+
+  .mapping-card {
+    background: radial-gradient(ellipse at center, #a8d8f0 0%, #ffd6a5 100%);
+    border-radius: 15px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+    padding: 2rem;
+    border: 1px solid #e0e0e0;
+  }
+
+  .mapping-header {
+    text-align: center;
+    margin-bottom: 1.5rem;
+  }
+
+  .mapping-header h2 {
+    font-size: 1.75rem;
+    font-weight: 600;
+    color: #212529;
+    margin-bottom: 0.25rem;
+  }
+
+  .mapping-header p {
+    color: #6c757d;
+    margin-bottom: 0;
+  }
+
+  .mapping-header .file-badge {
+    display: inline-block;
+    background: rgba(255,255,255,0.7);
+    padding: 0.3rem 0.9rem;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    color: #344054;
+    margin-top: 0.5rem;
+  }
+
+  /* Mapping rows panel */
+  .mapping-panel {
+    background: #fff;
+    border-radius: 8px;
+    border: 1px solid #d0d5dd;
+    overflow: hidden;
+    margin-bottom: 1.5rem;
+  }
+
+  .mapping-panel-header {
+    background: #f8f9fa;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #d0d5dd;
+    font-weight: 600;
+    color: #344054;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .mapping-panel-header .count {
+    color: #6c757d;
+    font-weight: normal;
+    font-size: 0.85rem;
+  }
+
+  .search-box {
+    padding: 0.6rem 1rem;
+    border-bottom: 1px solid #f0f0f0;
+  }
+
+  .search-box input {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid #d0d5dd;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    background: #fdfdfd;
+  }
+
+  .search-box input:focus {
+    outline: none;
+    border-color: #0d6efd;
+    box-shadow: 0 0 0 2px rgba(13, 110, 253, 0.15);
+  }
+
+  .mapping-panel-body {
+    max-height: 400px;
+    overflow-y: auto;
+  }
+
+  /* Each mapping row */
+  .mapping-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.7rem 1rem;
+    border-bottom: 1px solid #f0f0f0;
+    transition: background-color 0.15s;
+  }
+
+  .mapping-row:last-child {
+    border-bottom: none;
+  }
+
+  .mapping-row:hover {
+    background-color: #f8f9fa;
+  }
+
+  .mapping-row.is-mapped {
+    background-color: #f0fdf4;
+  }
+
+  .mapping-row .source-col {
+    flex: 1;
+    font-weight: 500;
+    color: #212529;
+    font-size: 0.9rem;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mapping-row .arrow {
+    color: #6c757d;
+    font-size: 1rem;
+    flex-shrink: 0;
+  }
+
+  .mapping-row .target-select {
+    flex: 1.2;
+    min-width: 0;
+  }
+
+  .mapping-row select {
+    width: 100%;
+    padding: 0.55rem 0.75rem;
+    border: 1px solid #d0d5dd;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    color: #344054;
+    background: #fff;
+    cursor: pointer;
+    transition: border-color 0.2s;
+  }
+
+  .mapping-row select:focus {
+    outline: none;
+    border-color: #0d6efd;
+    box-shadow: 0 0 0 2px rgba(13, 110, 253, 0.15);
+  }
+
+  .mapping-row select.mapped {
+    border-color: #198754;
+    background: rgba(25, 135, 84, 0.04);
+  }
+
+  /* Save template option */
+  .save-option {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.9rem 1rem;
+    background: rgba(255,255,255,0.7);
+    border-radius: 8px;
+    margin-bottom: 1.5rem;
+    cursor: pointer;
+    border: 1px solid #d0d5dd;
+    transition: background 0.2s;
+  }
+
+  .save-option:hover {
+    background: rgba(255,255,255,0.9);
+  }
+
+  .save-option input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+    accent-color: #0d6efd;
+  }
+
+  .save-option span {
+    color: #344054;
+    font-size: 0.9rem;
+  }
+
+  /* Action buttons */
+  .action-buttons {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+
+  .btn-cancel {
+    background: rgba(255,255,255,0.7);
+    color: #344054;
+    border: 1px solid #d0d5dd;
+    padding: 0.85rem 2rem;
+    border-radius: 8px;
+    font-weight: 500;
+    font-size: 1rem;
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    transition: all 0.2s;
+  }
+
+  .btn-cancel:hover {
+    background: rgba(255,255,255,0.95);
+    text-decoration: none;
+    color: #344054;
+  }
+
+  .btn-process {
+    background: #0d6efd;
+    color: white;
+    border: none;
+    padding: 0.85rem 2rem;
+    border-radius: 8px;
+    font-weight: 500;
+    font-size: 1rem;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    transition: all 0.3s ease;
+  }
+
+  .btn-process:hover {
+    background: #0b5ed7;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 15px rgba(13, 110, 253, 0.3);
+  }
+
+  /* Mapped count badge */
+  .mapped-badge {
+    background: #198754;
+    color: #fff;
+    padding: 0.15rem 0.5rem;
+    border-radius: 10px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+
+  .unmapped-badge {
+    background: #6c757d;
+    color: #fff;
+    padding: 0.15rem 0.5rem;
+    border-radius: 10px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="mapping-container">
+  <div class="mapping-card">
+
+    <div class="mapping-header">
+      <h2>📋 Map Columns</h2>
+      {% if session.sheet_name %}
+        <p>Mapping sheet: <strong style="color:#1d4ed8;">{{ session.sheet_name }}</strong>
+        {% if session.source_filename %}<span style="color:#6c757d; font-size:0.9rem;"> — from {{ session.source_filename }}</span>{% endif %}</p>
+      {% else %}
+        <p>Map your Excel columns to the target fields</p>
+      {% endif %}
+      <span class="file-badge">📄 {{ session.original_filename }}</span>
+      {% if session.batch_id %}
+        <div style="margin-top:0.5rem;">
+          <a href="{% url 'batch' session.batch_id %}" style="font-size:0.82rem; color:#6366f1; text-decoration:none;">← Back to Batch Overview</a>
+        </div>
+      {% endif %}
+    </div>
+
+    <form method="post">
+      {% csrf_token %}
+
+      <div class="mapping-panel">
+        <div class="mapping-panel-header">
+          <span>
+            <i class="fas fa-columns me-2" style="color: #0d6efd;"></i>
+            Column Mappings <span class="count">({{ headers|length }} columns)</span>
+          </span>
+          <span>
+            <span class="mapped-badge" id="mappedCount">0</span> mapped
+          </span>
+        </div>
+
+        <div class="search-box">
+          <input type="text" id="searchColumns" placeholder="Search columns..." oninput="filterRows()">
+        </div>
+
+        <div class="mapping-panel-body">
+          {% for header in headers %}
+          <div class="mapping-row {% if existing_mappings|get:header %}is-mapped{% endif %}" data-header="{{ header|lower }}">
+            <span class="source-col" title="{{ header }}">{{ header }}</span>
+            <span class="arrow">→</span>
+            <div class="target-select">
+              <select name="mapping_{{ header }}" class="mapping-select" onchange="handleSelectChange(this)">
+                <option value="">— Skip —</option>
+                {% for key, label in target_columns %}
+                  <option value="{{ key }}" {% if existing_mappings|get:header == key %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+
+      <label class="save-option">
+        <input type="checkbox" name="save_template" value="1">
+        <span>💾 Remember this mapping for future uploads</span>
+      </label>
+
+      <div class="action-buttons">
+        {% if session.batch_id %}
+        <a href="{% url 'batch' session.batch_id %}" class="btn-cancel">
+          ← Back to Batch
+        </a>
+        {% else %}
+        <a href="{% url 'upload' %}" class="btn-cancel">
+          ← Cancel
+        </a>
+        {% endif %}
+        <button type="submit" class="btn-process">
+          Process &amp; Upload →
+        </button>
+      </div>
+    </form>
+
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  function handleSelectChange(select) {
+    const row = select.closest('.mapping-row');
+    if (select.value) {
+      select.classList.add('mapped');
+      row.classList.add('is-mapped');
+    } else {
+      select.classList.remove('mapped');
+      row.classList.remove('is-mapped');
+    }
+    updateMappedCount();
+  }
+
+  function updateMappedCount() {
+    const total = document.querySelectorAll('.mapping-select').length;
+    const mapped = document.querySelectorAll('.mapping-select.mapped').length;
+    document.getElementById('mappedCount').textContent = mapped;
+  }
+
+  function filterRows() {
+    const query = document.getElementById('searchColumns').value.toLowerCase();
+    document.querySelectorAll('.mapping-row').forEach(row => {
+      const header = row.dataset.header;
+      row.style.display = header.includes(query) ? 'flex' : 'none';
+    });
+  }
+
+  // Initialize on page load
+  document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('.mapping-select').forEach(select => {
+      if (select.value) select.classList.add('mapped');
+    });
+    updateMappedCount();
+  });
+</script>
+{% endblock %}

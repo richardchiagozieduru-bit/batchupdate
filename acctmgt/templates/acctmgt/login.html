@@ -1,0 +1,344 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign In &mdash; FirstCentral Data Cleaner</title>
+    <style>
+        :root {
+            --blue:        #1b3f8f;
+            --blue-dark:   #122c6a;
+            --blue-light:  #2b56b8;
+            --orange:      #f47920;
+            --orange-dark: #d96810;
+            --white:       #ffffff;
+            --text:        #1e293b;
+            --text-muted:  #64748b;
+            --border:      #e2e8f0;
+            --bg:          #f4f7fb;
+            --error:       #ef4444;
+        }
+
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            background: var(--bg);
+        }
+
+        /* ── Left panel (form) ── */
+        .panel-left {
+            flex: 0 0 420px;
+            order: 1;
+            background: var(--white);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            padding: 3rem 2.75rem;
+            position: relative;
+            z-index: 1;
+        }
+
+        .form-logo {
+            margin-bottom: 2.25rem;
+        }
+        .form-logo img {
+            width: 170px;
+            height: auto;
+        }
+
+        .form-heading {
+            font-size: 1.6rem;
+            font-weight: 700;
+            color: var(--text);
+            margin-bottom: 0.35rem;
+            letter-spacing: -0.02em;
+        }
+        .form-subheading {
+            font-size: 0.875rem;
+            color: var(--text-muted);
+            margin-bottom: 2rem;
+        }
+
+        .form-group {
+            margin-bottom: 1.25rem;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 0.45rem;
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--text);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 0.8rem 1rem;
+            background: var(--bg);
+            border: 1.5px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            font-size: 0.95rem;
+            transition: border-color 0.18s, box-shadow 0.18s;
+        }
+        .form-group input:focus {
+            outline: none;
+            border-color: var(--blue);
+            box-shadow: 0 0 0 3px rgba(27,63,143,0.12);
+            background: #fff;
+        }
+
+        .btn-accent-line {
+            height: 3px;
+            background: linear-gradient(90deg, var(--orange), var(--orange-dark));
+            border-radius: 2px;
+            margin-bottom: 1rem;
+            margin-top: 0.75rem;
+        }
+
+        .btn-signin {
+            width: 100%;
+            padding: 0.9rem 1rem;
+            background: linear-gradient(135deg, var(--blue), var(--blue-light));
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            letter-spacing: 0.02em;
+            transition: opacity 0.18s, box-shadow 0.18s;
+        }
+        .btn-signin:hover {
+            opacity: 0.91;
+            box-shadow: 0 6px 20px rgba(27,63,143,0.3);
+        }
+
+        .register-link {
+            text-align: center;
+            margin-top: 1.5rem;
+            font-size: 0.875rem;
+            color: var(--text-muted);
+        }
+        .register-link a {
+            color: var(--orange);
+            font-weight: 600;
+            text-decoration: none;
+        }
+        .register-link a:hover { text-decoration: underline; }
+
+        .alert-error {
+            background: rgba(239,68,68,0.07);
+            border: 1px solid rgba(239,68,68,0.25);
+            border-left: 3px solid var(--error);
+            color: #b91c1c;
+            padding: 0.75rem 1rem;
+            border-radius: 6px;
+            margin-bottom: 1.25rem;
+            font-size: 0.875rem;
+        }
+
+        /* ── Right panel (branding) ── */
+        .panel-right {
+            flex: 1;
+            order: 2;
+            background: linear-gradient(150deg, var(--blue-dark) 0%, var(--blue) 55%, var(--blue-light) 100%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 3rem 3.5rem;
+            position: relative;
+            overflow: hidden;
+            min-height: 100vh;
+        }
+
+        .panel-right::before,
+        .panel-right::after {
+            content: '';
+            position: absolute;
+            border-radius: 50%;
+            border: 2px solid rgba(255,255,255,0.07);
+            pointer-events: none;
+        }
+        .panel-right::before {
+            width: 580px; height: 580px;
+            bottom: -190px; right: -150px;
+        }
+        .panel-right::after {
+            width: 370px; height: 370px;
+            bottom: -110px; right: -60px;
+            border-width: 1.5px;
+        }
+        .ring-extra {
+            position: absolute;
+            width: 200px; height: 200px;
+            bottom: -25px; right: 45px;
+            border-radius: 50%;
+            border: 1px solid rgba(255,255,255,0.07);
+            pointer-events: none;
+        }
+        .ring-accent {
+            position: absolute;
+            width: 300px; height: 300px;
+            top: -90px; left: -90px;
+            border-radius: 50%;
+            border: 2px solid rgba(244,121,32,0.16);
+            pointer-events: none;
+        }
+        .ring-accent2 {
+            position: absolute;
+            width: 160px; height: 160px;
+            top: -30px; left: -30px;
+            border-radius: 50%;
+            border: 1.5px solid rgba(244,121,32,0.1);
+            pointer-events: none;
+        }
+
+        .brand-logo {
+            width: 240px;
+            max-width: 70%;
+            margin-bottom: 2.5rem;
+            filter: brightness(0) invert(1);
+            position: relative;
+            z-index: 1;
+        }
+
+        .brand-divider {
+            width: 48px; height: 3px;
+            background: var(--orange);
+            border-radius: 2px;
+            margin: 0 auto 1.75rem;
+            position: relative; z-index: 1;
+        }
+
+        .brand-tagline {
+            color: rgba(255,255,255,0.72);
+            font-size: 0.95rem;
+            text-align: center;
+            line-height: 1.65;
+            max-width: 320px;
+            position: relative;
+            z-index: 1;
+        }
+        .brand-tagline strong {
+            display: block;
+            font-size: 1.45rem;
+            font-weight: 700;
+            color: #fff;
+            letter-spacing: -0.01em;
+            margin-bottom: 0.5rem;
+        }
+
+        .brand-features {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            margin-top: 2rem;
+            position: relative; z-index: 1;
+            width: 100%;
+            max-width: 300px;
+        }
+        .brand-feature {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            color: rgba(255,255,255,0.72);
+            font-size: 0.875rem;
+        }
+        .brand-feature-dot {
+            width: 7px; height: 7px;
+            border-radius: 50%;
+            background: var(--orange);
+            flex-shrink: 0;
+        }
+
+        @media (max-width: 768px) {
+            body { flex-direction: column; }
+            .panel-left  { flex: none; order: 2; padding: 2rem 1.5rem; }
+            .panel-right { flex: none; order: 1; min-height: 220px; padding: 2rem 1.5rem; }
+            .brand-features { display: none; }
+            .brand-logo { width: 180px; margin-bottom: 1rem; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Left: Form -->
+    <div class="panel-left">
+        <div class="form-logo">
+            <img src="{% static 'img/logo.png' %}" alt="FirstCentral Credit Bureau">
+        </div>
+
+        <div class="form-heading">Sign In</div>
+        <div class="form-subheading">Access the Data Cleaner portal</div>
+
+        {% if messages %}
+            {% for message in messages %}
+                <div class="alert-error">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+
+        <form method="post">
+            {% csrf_token %}
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" name="username" required autofocus placeholder="Enter your username">
+            </div>
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" required placeholder="Enter your password">
+            </div>
+            <div class="btn-accent-line"></div>
+            <button type="submit" class="btn-signin">Sign In &rarr;</button>
+        </form>
+
+        <div style="text-align:right; margin-top:0.6rem;">
+            <a href="{% url 'password_reset' %}" style="font-size:0.8rem; color:var(--text-muted); text-decoration:none;">Forgot password?</a>
+        </div>
+
+        <div class="register-link">
+            New external user? <a href="{% url 'register' %}">Create account</a>
+        </div>
+    </div>
+
+    <!-- Right: Branding -->
+    <div class="panel-right">
+        <div class="ring-accent"></div>
+        <div class="ring-accent2"></div>
+        <div class="ring-extra"></div>
+
+        <img class="brand-logo" src="{% static 'img/logo.png' %}" alt="FirstCentral Credit Bureau">
+        <div class="brand-divider"></div>
+
+        <div class="brand-tagline">
+            <strong>Data Cleaner Portal</strong>
+            Streamlined CRC data processing for financial institutions across Nigeria.
+        </div>
+
+        <div class="brand-features">
+            <div class="brand-feature">
+                <div class="brand-feature-dot"></div>
+                Automated data validation &amp; cleaning
+            </div>
+            <div class="brand-feature">
+                <div class="brand-feature-dot"></div>
+                Direct BatchUpdate integration
+            </div>
+            <div class="brand-feature">
+                <div class="brand-feature-dot"></div>
+                Multi-sheet batch processing
+            </div>
+            <div class="brand-feature">
+                <div class="brand-feature-dot"></div>
+                SQL script generation
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>

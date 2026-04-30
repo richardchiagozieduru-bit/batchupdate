@@ -1,0 +1,186 @@
+{% extends 'base.html' %}
+
+{% block title %}Results - Data Cleaner{% endblock %}
+
+{% block extra_css %}
+<style>
+    .result-header {
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    
+    .result-header .icon {
+        font-size: 4rem;
+        margin-bottom: 1rem;
+    }
+    
+    .result-header h2 {
+        font-size: 1.75rem;
+        margin-bottom: 0.5rem;
+    }
+    
+    .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 1.5rem;
+        margin-bottom: 2rem;
+    }
+    
+    .stat-card {
+        background: var(--bg-dark);
+        border-radius: 12px;
+        padding: 1.5rem;
+        text-align: center;
+        border: 1px solid var(--border);
+    }
+    
+    .stat-card .value {
+        font-size: 2rem;
+        font-weight: 700;
+        color: var(--primary);
+    }
+    
+    .stat-card .label {
+        color: var(--text-muted);
+        font-size: 0.85rem;
+        margin-top: 0.25rem;
+    }
+    
+    .mapping-summary {
+        margin-bottom: 2rem;
+    }
+    
+    .mapping-summary h3 {
+        font-size: 1rem;
+        color: var(--text-muted);
+        margin-bottom: 1rem;
+    }
+    
+    .mapping-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+    
+    .mapping-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 1rem;
+        background: var(--bg-dark);
+        border-radius: 20px;
+        font-size: 0.85rem;
+        border: 1px solid var(--border);
+    }
+    
+    .mapping-chip .arrow {
+        color: var(--primary);
+    }
+    
+    .actions {
+        display: flex;
+        gap: 1rem;
+        justify-content: center;
+        margin-top: 2rem;
+    }
+    
+    .error-box {
+        background: rgba(239, 68, 68, 0.2);
+        border: 1px solid var(--error);
+        border-radius: 10px;
+        padding: 1rem;
+        margin-bottom: 2rem;
+        color: #fca5a5;
+    }
+    
+    .success-icon { color: var(--success); }
+    .warning-icon { color: var(--warning); }
+    .error-icon { color: var(--error); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="result-header">
+        {% if session.status == 'uploaded' %}
+            <div class="icon success-icon">✅</div>
+            <h2>Upload Complete!</h2>
+            <p>Data cleaned and uploaded to SQL Server</p>
+        {% elif session.status == 'processed' %}
+            <div class="icon warning-icon">⚠️</div>
+            <h2>Processed (SQL Upload Pending)</h2>
+            <p>Data cleaned but SQL upload had issues</p>
+        {% else %}
+            <div class="icon error-icon">❌</div>
+            <h2>Error Occurred</h2>
+            <p>There was a problem processing your file</p>
+        {% endif %}
+    </div>
+    
+    {% if session.error_message %}
+    <div class="error-box">
+        <strong>Error Details:</strong> {{ session.error_message }}
+    </div>
+    {% endif %}
+    
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="value">{{ session.rows_processed }}</div>
+            <div class="label">Rows Processed</div>
+        </div>
+        <div class="stat-card">
+            <div class="value">{{ session.rows_uploaded }}</div>
+            <div class="label">Rows Uploaded</div>
+        </div>
+        <div class="stat-card">
+            <div class="value">{{ mappings|length }}</div>
+            <div class="label">Columns Mapped</div>
+        </div>
+        {% if session.rows_rejected > 0 %}
+        <div class="stat-card" style="border-color: #ef4444;">
+            <div class="value" style="color: #ef4444;">{{ session.rows_rejected }}</div>
+            <div class="label">Rows Rejected</div>
+        </div>
+        {% endif %}
+        {% if session.sheet_name %}
+        <div class="stat-card">
+            <div class="value" style="font-size: 1rem;">{{ session.sheet_name }}</div>
+            <div class="label">Sheet Name</div>
+        </div>
+        {% endif %}
+        {% if session.batchupdate_uploaded %}
+        <div class="stat-card" style="border-color: #10b981;">
+            <div class="value" style="color: #10b981; font-size: 1.5rem;">✓</div>
+            <div class="label">BatchUpdate DB</div>
+        </div>
+        {% endif %}
+    </div>
+    
+    <div class="mapping-summary">
+        <h3>Column Mappings Used</h3>
+        <div class="mapping-list">
+            {% for mapping in mappings %}
+            <span class="mapping-chip">
+                {{ mapping.original_header }} <span class="arrow">→</span> {{ mapping.get_target_column_display }}
+            </span>
+            {% endfor %}
+        </div>
+    </div>
+    
+    <div class="actions">
+        <a href="{% url 'upload' %}" class="btn btn-secondary">← Upload Another</a>
+        {% if session.batch_id %}
+        <a href="{% url 'batch' session.batch_id %}" class="btn" style="background: linear-gradient(135deg, #6366f1, #4338ca);">📂 Back to Batch</a>
+        {% endif %}
+        {% if session.processed_file and not is_external %}
+        <a href="{% url 'download' session.id %}" class="btn btn-success">📥 Download Cleaned Data</a>
+        {% endif %}
+        {% if session.rejected_file %}
+        <a href="{% url 'download_rejected' session.id %}" class="btn" style="background: linear-gradient(135deg, #f59e0b, #d97706);">⚠️ Download Rejected Rows</a>
+        {% endif %}
+        {% if session.generated_script and not is_external %}
+        <a href="{% url 'download_script' session.id %}" class="btn" style="background: linear-gradient(135deg, #1b3f8f, #122c6a);">📜 Download SQL Script</a>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

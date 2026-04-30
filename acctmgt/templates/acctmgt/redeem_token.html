@@ -1,0 +1,247 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Activate Account &mdash; FirstCentral Data Cleaner</title>
+    <style>
+        :root {
+            --blue:       #1b3f8f;
+            --blue-dark:  #122c6a;
+            --blue-light: #2b56b8;
+            --orange:     #f47920;
+            --orange-dark:#d96810;
+            --text:       #1e293b;
+            --text-muted: #64748b;
+            --border:     #e2e8f0;
+            --bg:         #f4f7fb;
+            --error:      #ef4444;
+        }
+
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--bg);
+            padding: 2rem 1rem;
+        }
+
+        .card {
+            background: #fff;
+            border-radius: 16px;
+            padding: 2.75rem 2.5rem;
+            width: 100%;
+            max-width: 480px;
+            box-shadow: 0 4px 32px rgba(27,63,143,0.11);
+            border: 1px solid var(--border);
+        }
+
+        /* Logo */
+        .card-logo {
+            text-align: center;
+            margin-bottom: 1.75rem;
+        }
+        .card-logo img { width: 170px; height: auto; }
+
+        /* Orange accent top bar */
+        .top-bar {
+            height: 4px;
+            background: linear-gradient(90deg, var(--blue) 0%, var(--orange) 100%);
+            border-radius: 2px;
+            margin-bottom: 1.75rem;
+        }
+
+        /* Step badge */
+        .step-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: #eef2fb;
+            border: 1px solid #c7d4f5;
+            border-radius: 20px;
+            padding: 0.3rem 0.9rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--blue);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.75rem;
+        }
+        .step-dot {
+            width: 7px; height: 7px;
+            border-radius: 50%;
+            background: var(--orange);
+        }
+
+        .card-heading {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--text);
+            margin-bottom: 0.35rem;
+            letter-spacing: -0.02em;
+        }
+        .card-sub {
+            font-size: 0.875rem;
+            color: var(--text-muted);
+            margin-bottom: 1.5rem;
+            line-height: 1.55;
+        }
+
+        /* Info box */
+        .info-box {
+            background: #eef2fb;
+            border: 1px solid #c7d4f5;
+            border-left: 3px solid var(--blue);
+            border-radius: 8px;
+            padding: 0.85rem 1rem;
+            margin-bottom: 1.5rem;
+            font-size: 0.855rem;
+            color: var(--blue);
+            line-height: 1.55;
+        }
+
+        /* Form */
+        .form-group { margin-bottom: 1.2rem; }
+        .form-group label {
+            display: block;
+            font-size: 0.78rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--text);
+            margin-bottom: 0.45rem;
+        }
+        .form-group select,
+        .form-group input {
+            width: 100%;
+            padding: 0.8rem 1rem;
+            background: var(--bg);
+            border: 1.5px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            font-size: 0.925rem;
+            font-family: inherit;
+            transition: border-color 0.18s, box-shadow 0.18s;
+            appearance: none;
+            -webkit-appearance: none;
+        }
+        .form-group select {
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 1rem center;
+            padding-right: 2.5rem;
+            cursor: pointer;
+        }
+        .form-group select:focus,
+        .form-group input:focus {
+            outline: none;
+            border-color: var(--blue);
+            box-shadow: 0 0 0 3px rgba(27,63,143,0.1);
+            background-color: #fff;
+        }
+        .form-group .field-hint {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-top: 0.35rem;
+        }
+
+        .divider {
+            height: 3px;
+            background: linear-gradient(90deg, var(--orange), var(--orange-dark));
+            border-radius: 2px;
+            margin: 0.5rem 0 1.25rem;
+        }
+
+        .btn-activate {
+            width: 100%;
+            padding: 0.9rem 1rem;
+            background: linear-gradient(135deg, var(--blue), var(--blue-light));
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            letter-spacing: 0.02em;
+            transition: opacity 0.18s, box-shadow 0.18s;
+        }
+        .btn-activate:hover {
+            opacity: 0.91;
+            box-shadow: 0 6px 20px rgba(27,63,143,0.28);
+        }
+
+        .alert-error {
+            background: rgba(239,68,68,0.07);
+            border: 1px solid rgba(239,68,68,0.25);
+            border-left: 3px solid var(--error);
+            color: #b91c1c;
+            padding: 0.7rem 1rem;
+            border-radius: 6px;
+            margin-bottom: 1rem;
+            font-size: 0.875rem;
+        }
+
+        @media (max-width: 540px) {
+            .card { padding: 2rem 1.5rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+
+        <div class="card-logo">
+            <img src="{% static 'img/logo.png' %}" alt="FirstCentral Credit Bureau">
+        </div>
+
+        <div class="top-bar"></div>
+
+        <div class="step-badge">
+            <div class="step-dot"></div>
+            Step 2 of 2
+        </div>
+
+        <div class="card-heading">Activate Account</div>
+        <div class="card-sub">Link your account to your organisation using the token provided by FirstCentral.</div>
+
+        <div class="info-box">
+            Select your organisation from the dropdown, then enter the one-time activation token provided by your administrator.
+        </div>
+
+        {% if messages %}
+            {% for message in messages %}
+                <div class="alert-error">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+
+        <form method="post">
+            {% csrf_token %}
+            <div class="form-group">
+                <label for="subscriber">Subscriber / Organisation</label>
+                <select id="subscriber" name="subscriber" required>
+                    <option value="">— Select your organisation —</option>
+                    {% for sub in subscribers %}
+                    <option value="{{ sub.subscriber_id }}">{{ sub.subscriber_name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="token">Activation Token</label>
+                <input type="text" id="token" name="token"
+                       placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                       required autocomplete="off">
+                <div class="field-hint">Paste the token exactly as provided &mdash; it is case-sensitive.</div>
+            </div>
+
+            <div class="divider"></div>
+            <button type="submit" class="btn-activate">Activate &amp; Continue &rarr;</button>
+        </form>
+
+    </div>
+</body>
+</html>
+    
