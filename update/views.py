@@ -754,31 +754,31 @@ def _stream_parquet_as_excel(parquet_path, base_name, response):
     import pyarrow.parquet as pq
     import xlsxwriter
     import pandas as pd
-    
+
     workbook = xlsxwriter.Workbook(response, {'constant_memory': True})
-    sheet_title = base_name[:31]  # Excel sheet limit
+    sheet_title = base_name[:31]  # Excel sheet name limit
     ws = workbook.add_worksheet(sheet_title)
-    
-    # Setup styles
+
+    # Formats must be combined upfront — xlsxwriter applies format at write time
     header_format = workbook.add_format({'bold': False})
+    # AccountNo: text + left-aligned in one combined format
+    account_format = workbook.add_format({'num_format': '@', 'align': 'left'})
     text_format = workbook.add_format({'num_format': '@'})
     numeric_format = workbook.add_format({'num_format': 'General'})
-    left_align = workbook.add_format({'align': 'left'})
-    
+
     numeric_names = {'CurrentBalanceAmt', 'AmountOverdue', 'MonthsInArrears'}
     text_names = {'LoanClassification', 'AccountStatusCode'}
     account_no_names = {'AccountNo'}
-    
-    # Read schema/headers from the first batch
+
+    # Read schema/headers from Parquet metadata
     pf = pq.ParquetFile(parquet_path)
-    first_batch = next(pf.iter_batches(batch_size=1))
-    headers = first_batch.schema.names
-    
-    # Write headers
+    headers = pf.schema_arrow.names
+
+    # Write header row
     for col_idx, header in enumerate(headers):
         ws.write(0, col_idx, header, header_format)
-        
-    # Write rows in batches
+
+    # Write data rows in batches to keep memory flat
     row_idx = 1
     for batch in pf.iter_batches(batch_size=5000):
         df = batch.to_pandas()
@@ -788,10 +788,9 @@ def _stream_parquet_as_excel(parquet_path, base_name, response):
                 if pd.isna(val) or val is None:
                     ws.write_blank(row_idx, col_idx, None)
                     continue
-                
+
                 if header in account_no_names:
-                    ws.write_string(row_idx, col_idx, str(val), text_format)
-                    ws.set_cell_format(row_idx, col_idx, left_align)
+                    ws.write_string(row_idx, col_idx, str(val), account_format)
                 elif header in text_names:
                     ws.write_string(row_idx, col_idx, str(val), text_format)
                 elif header in numeric_names:
@@ -802,7 +801,7 @@ def _stream_parquet_as_excel(parquet_path, base_name, response):
                 else:
                     ws.write(row_idx, col_idx, val)
             row_idx += 1
-            
+
     workbook.close()
 
 
@@ -1009,13 +1008,13 @@ def download_batch_combined(request, batch_id):
 
     # Initialize the workbook directly on the HTTP response with constant_memory enabled
     workbook = xlsxwriter.Workbook(response, {'constant_memory': True})
-    
-    # Setup formats
+
+    # Formats must be combined upfront — xlsxwriter applies format at write time
     header_format = workbook.add_format({'bold': False})
+    account_format = workbook.add_format({'num_format': '@', 'align': 'left'})
     text_format = workbook.add_format({'num_format': '@'})
     numeric_format = workbook.add_format({'num_format': 'General'})
-    left_align = workbook.add_format({'align': 'left'})
-    
+
     numeric_names = {'CurrentBalanceAmt', 'AmountOverdue', 'MonthsInArrears'}
     text_names = {'LoanClassification', 'AccountStatusCode'}
     account_no_names = {'AccountNo'}
@@ -1040,8 +1039,8 @@ def download_batch_combined(request, batch_id):
             # Write headers
             for col_idx, header in enumerate(headers):
                 ws.write(0, col_idx, header, header_format)
-                
-            # Write rows
+
+            # Write rows in batches
             row_idx = 1
             for batch in pf.iter_batches(batch_size=5000):
                 df = batch.to_pandas()
@@ -1051,10 +1050,9 @@ def download_batch_combined(request, batch_id):
                         if pd.isna(val) or val is None:
                             ws.write_blank(row_idx, col_idx, None)
                             continue
-                        
+
                         if header in account_no_names:
-                            ws.write_string(row_idx, col_idx, str(val), text_format)
-                            ws.set_cell_format(row_idx, col_idx, left_align)
+                            ws.write_string(row_idx, col_idx, str(val), account_format)
                         elif header in text_names:
                             ws.write_string(row_idx, col_idx, str(val), text_format)
                         elif header in numeric_names:

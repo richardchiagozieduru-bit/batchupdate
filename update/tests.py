@@ -325,12 +325,12 @@ class HybridAndParquetPipelineTests(TestCase):
 
         try:
             pq.write_table(table, pq_path)
-            
-            # Stream as Excel
+
+            # Stream as Excel into a BytesIO buffer
             response_stream = io.BytesIO()
             _stream_parquet_as_excel(pq_path, "test_sheet", response_stream)
-            
-            # Verify we can read it back as Excel
+
+            # xlsxwriter writes and closes the stream; seek back to verify
             response_stream.seek(0)
             restored_df = pd.read_excel(response_stream, engine='openpyxl')
             self.assertEqual(len(restored_df), 1)
@@ -338,4 +338,5 @@ class HybridAndParquetPipelineTests(TestCase):
             self.assertEqual(float(restored_df.iloc[0]['CurrentBalanceAmt']), 12345.67)
         finally:
             os.remove(pq_path)
+
 
