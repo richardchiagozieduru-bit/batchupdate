@@ -3,7 +3,11 @@ Async tasks for data processing using Django-Q2.
 """
 import os
 import logging
+import gc
+import hashlib
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 logger = logging.getLogger(__name__)
 
@@ -12,83 +16,210 @@ from .services import (
     clean_dataframe, read_uploaded_file, save_df_to_excel_robust,
     upload_raw_to_batchupdate, DISPLAY_HEADERS,
     excel_to_csv_streaming, LARGE_FILE_THRESHOLD_MB, CSV_CHUNK_SIZE,
+    read_account_column_styled, should_use_chunking, upload_parquet_to_batchupdate,
 )
 from django.conf import settings
 
+# PyArrow schemas matching DISPLAY_HEADERS type rules
+CLEANED_ARROW_SCHEMA = pa.schema([
+    ('AccountNo', pa.string()),
+    ('CurrentBalanceAmt', pa.float64()),
+    ('AmountOverdue', pa.float64()),
+    ('MonthsInArrears', pa.float64()), # Use float64 to support NaN/NULL safely
+    ('LoanClassification', pa.string()),
+    ('AccountStatusCode', pa.string()),
+])
 
-def _load_and_clean(file_path, mappings, header_row, session_id):
+REJECTED_ARROW_SCHEMA = pa.schema([
+    ('AccountNo', pa.string()),
+    ('CurrentBalanceAmt', pa.float64()),
+    ('AmountOverdue', pa.float64()),
+    ('MonthsInArrears', pa.float64()),
+    ('LoanClassification', pa.string()),
+    ('AccountStatusCode', pa.string()),
+    ('Rejection Reason', pa.string()),
+])
+
+
+def _load_and_clean(file_path, mappings, header_row, session_id, cleaned_parquet_path, rejected_parquet_path):
     """
-    Load a file and clean it, using chunked processing for large Excel files.
+    Load a file and clean it, using chunked processing for large Excel or CSV files.
+    Saves cleaned and rejected records directly to Parquet on disk to maintain
+    flat memory usage.
 
-    Strategy:
-    - .xlsx over LARGE_FILE_THRESHOLD_MB: stream-convert to a temp CSV (openpyxl
-      read_only mode, row-by-row, never loads the workbook into RAM), then process
-      the CSV in CSV_CHUNK_SIZE-row chunks. Peak memory = one chunk of cleaned data
-      (6 columns) rather than the full source file.
-    - .xls or any file under the threshold: full load via pd.read_excel as before.
-    - .csv: full load (CSV chunking can be added later if needed for very large CSVs).
-
-    Cross-chunk deduplication is handled by tracking seen account_number values
-    in a set. Within-chunk deduplication is handled by clean_dataframe.
-
-    Returns: (cleaned_df, rejected_df)
+    Returns: (cleaned_count, rejected_count)
     """
     ext = os.path.splitext(file_path)[1].lower()
-    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    use_chunked = ext == '.xlsx' and file_size_mb > LARGE_FILE_THRESHOLD_MB
+    use_chunked = should_use_chunking(file_path)
+
+    # Style-aware account column recovery for Excel
+    source_account_col = next(
+        (src for src, tgt in mappings.items() if tgt == 'account_number'), None
+    )
+    corrected_accounts = None
+    if source_account_col and ext == '.xlsx':
+        try:
+            corrected_accounts = read_account_column_styled(
+                file_path, sheet_name=None, header_row=header_row, col_name=source_account_col
+            )
+            if corrected_accounts is not None:
+                logger.info(
+                    f"[Session {session_id}] Style-aware account read: "
+                    f"{len(corrected_accounts)} values for '{source_account_col}'"
+                )
+        except Exception as exc:
+            logger.warning(
+                f"[Session {session_id}] Style-aware account read failed ({exc}); using raw values"
+            )
+            corrected_accounts = None
+
+    cleaned_count = 0
+    rejected_count = 0
 
     if use_chunked:
         logger.info(
-            f"[Session {session_id}] Large Excel ({file_size_mb:.1f} MB > {LARGE_FILE_THRESHOLD_MB} MB) — "
-            f"stream-converting to CSV then processing in {CSV_CHUNK_SIZE}-row chunks"
+            f"[Session {session_id}] Using CHUNKED processing pipeline for memory safety."
         )
         csv_path = file_path + '.tmp.csv'
+        is_excel = ext in ('.xlsx', '.xls')
+        
         try:
-            excel_to_csv_streaming(file_path, csv_path, header_row=header_row)
-            # After conversion the header is at row 0 in the CSV
-            cleaned_chunks, rejected_chunks = [], []
-            seen_accounts = set()  # cross-chunk deduplication
+            if is_excel:
+                excel_to_csv_streaming(file_path, csv_path, header_row=header_row)
+                csv_header = 0
+            else:
+                csv_path = file_path
+                csv_header = header_row
 
-            for chunk in pd.read_csv(csv_path, dtype=str, chunksize=CSV_CHUNK_SIZE, header=0):
+            # Set up PyArrow writers
+            cleaned_writer = pq.ParquetWriter(cleaned_parquet_path, schema=CLEANED_ARROW_SCHEMA, compression='snappy')
+            rejected_writer = pq.ParquetWriter(rejected_parquet_path, schema=REJECTED_ARROW_SCHEMA, compression='snappy')
+            
+            seen_rows = set()  # Cross-chunk deduplication: stores tuples of row values
+            chunk_offset = 0
+
+            # Process chunk-by-chunk
+            for chunk in pd.read_csv(csv_path, dtype=str, chunksize=CSV_CHUNK_SIZE, header=csv_header):
+                chunk_len = len(chunk)
+                
+                # Patch account column with style-aware values if Excel
+                if is_excel and corrected_accounts is not None and source_account_col in chunk.columns:
+                    slice_ = corrected_accounts[chunk_offset:chunk_offset + chunk_len]
+                    if len(slice_) == chunk_len:
+                        chunk = chunk.copy()
+                        chunk[source_account_col] = slice_
+                chunk_offset += chunk_len
+
                 c_df, r_df = clean_dataframe(chunk, mappings, format_for_display=False)
 
-                # Remove rows whose account_number was already seen in a prior chunk
-                if 'account_number' in c_df.columns and seen_accounts:
-                    before = len(c_df)
-                    c_df = c_df[~c_df['account_number'].isin(seen_accounts)]
-                    removed = before - len(c_df)
-                    if removed:
-                        logger.info(f"[Session {session_id}] Cross-chunk dedup removed {removed} rows")
+                # Cross-chunk exact row deduplication (all columns)
+                if not c_df.empty:
+                    c_df = c_df.drop_duplicates(keep='first')
+                    row_tuples = [tuple(x) for x in c_df.itertuples(index=False)]
+                    is_new = []
+                    for t in row_tuples:
+                        if t in seen_rows:
+                            is_new.append(False)
+                        else:
+                            seen_rows.add(t)
+                            is_new.append(True)
+                    c_df = c_df[is_new].reset_index(drop=True)
 
-                if 'account_number' in c_df.columns:
-                    seen_accounts.update(c_df['account_number'].dropna().tolist())
+                # Rename columns for PyArrow schema and format types
+                if not c_df.empty:
+                    c_df = c_df.rename(columns=DISPLAY_HEADERS)
+                    for col in ['CurrentBalanceAmt', 'AmountOverdue', 'MonthsInArrears']:
+                        c_df[col] = pd.to_numeric(c_df[col], errors='coerce')
+                    for col in ['AccountNo', 'LoanClassification', 'AccountStatusCode']:
+                        c_df[col] = c_df[col].astype(str).replace(['None', 'nan', '<NA>'], None)
+                    
+                    table = pa.Table.from_pandas(c_df[CLEANED_ARROW_SCHEMA.names], schema=CLEANED_ARROW_SCHEMA, preserve_index=False)
+                    cleaned_writer.write_table(table)
+                    cleaned_count += len(c_df)
 
-                cleaned_chunks.append(c_df)
                 if not r_df.empty:
-                    rejected_chunks.append(r_df)
+                    reason_col = r_df['Rejection Reason']
+                    r_df = r_df.drop(columns=['Rejection Reason']).rename(columns=DISPLAY_HEADERS)
+                    r_df['Rejection Reason'] = reason_col
+                    
+                    for col in ['CurrentBalanceAmt', 'AmountOverdue', 'MonthsInArrears']:
+                        r_df[col] = pd.to_numeric(r_df[col], errors='coerce')
+                    for col in ['AccountNo', 'LoanClassification', 'AccountStatusCode', 'Rejection Reason']:
+                        r_df[col] = r_df[col].astype(str).replace(['None', 'nan', '<NA>'], None)
+                    
+                    table = pa.Table.from_pandas(r_df[REJECTED_ARROW_SCHEMA.names], schema=REJECTED_ARROW_SCHEMA, preserve_index=False)
+                    rejected_writer.write_table(table)
+                    rejected_count += len(r_df)
 
-            cleaned_df = pd.concat(cleaned_chunks, ignore_index=True) if cleaned_chunks else pd.DataFrame()
-            rejected_df = pd.concat(rejected_chunks, ignore_index=True) if rejected_chunks else pd.DataFrame()
-            logger.info(
-                f"[Session {session_id}] Chunked processing complete: "
-                f"{len(cleaned_df)} valid, {len(rejected_df)} rejected"
-            )
+                # Garbage collect immediately to keep RAM flat
+                del chunk, c_df, r_df
+                gc.collect()
+
+            cleaned_writer.close()
+            rejected_writer.close()
+
         finally:
-            if os.path.exists(csv_path):
+            if is_excel and os.path.exists(csv_path):
                 os.remove(csv_path)
                 logger.info(f"[Session {session_id}] Deleted temp CSV: {csv_path}")
     else:
+        logger.info(
+            f"[Session {session_id}] Using SINGLE-BATCH processing pipeline."
+        )
         df = read_uploaded_file(file_path, header=header_row)
-        logger.info(f"[Session {session_id}] File read: {len(df)} rows, {len(df.columns)} columns")
-        cleaned_df, rejected_df = clean_dataframe(df, mappings, format_for_display=False)
+        
+        # Patch account column with style-aware values if available
+        if corrected_accounts is not None and source_account_col in df.columns:
+            if len(corrected_accounts) == len(df):
+                df[source_account_col] = corrected_accounts
+            else:
+                logger.warning(
+                    f"[Session {session_id}] Style-aware account length mismatch "
+                    f"({len(corrected_accounts)} vs {len(df)} rows); using raw values"
+                )
 
-    return cleaned_df, rejected_df
+        c_df, r_df = clean_dataframe(df, mappings, format_for_display=False)
+        
+        if not c_df.empty:
+            c_df = c_df.drop_duplicates(keep='first').rename(columns=DISPLAY_HEADERS)
+            for col in ['CurrentBalanceAmt', 'AmountOverdue', 'MonthsInArrears']:
+                c_df[col] = pd.to_numeric(c_df[col], errors='coerce')
+            for col in ['AccountNo', 'LoanClassification', 'AccountStatusCode']:
+                c_df[col] = c_df[col].astype(str).replace(['None', 'nan', '<NA>'], None)
+            
+            table = pa.Table.from_pandas(c_df[CLEANED_ARROW_SCHEMA.names], schema=CLEANED_ARROW_SCHEMA, preserve_index=False)
+            pq.write_table(table, cleaned_parquet_path, compression='snappy')
+            cleaned_count = len(c_df)
+        else:
+            # Write empty Parquet with schema
+            pq.write_table(CLEANED_ARROW_SCHEMA.empty_table(), cleaned_parquet_path)
+
+        if not r_df.empty:
+            reason_col = r_df['Rejection Reason']
+            r_df = r_df.drop(columns=['Rejection Reason']).rename(columns=DISPLAY_HEADERS)
+            r_df['Rejection Reason'] = reason_col
+            
+            for col in ['CurrentBalanceAmt', 'AmountOverdue', 'MonthsInArrears']:
+                r_df[col] = pd.to_numeric(r_df[col], errors='coerce')
+            for col in ['AccountNo', 'LoanClassification', 'AccountStatusCode', 'Rejection Reason']:
+                r_df[col] = r_df[col].astype(str).replace(['None', 'nan', '<NA>'], None)
+            
+            table = pa.Table.from_pandas(r_df[REJECTED_ARROW_SCHEMA.names], schema=REJECTED_ARROW_SCHEMA, preserve_index=False)
+            pq.write_table(table, rejected_parquet_path, compression='snappy')
+            rejected_count = len(r_df)
+        else:
+            pq.write_table(REJECTED_ARROW_SCHEMA.empty_table(), rejected_parquet_path)
+
+        del df, c_df, r_df
+        gc.collect()
+
+    return cleaned_count, rejected_count
 
 
 def process_file_task(session_id):
     """
     Async task to process and clean uploaded file.
-    Called by django-q's async_task().
+    Saves results directly as Parquet files on disk.
     """
     session = UploadSession.objects.get(id=session_id)
     logger.info(f"[Session {session_id}] Starting processing: {session.original_filename}")
@@ -108,77 +239,57 @@ def process_file_task(session_id):
         
         logger.info(f"[Session {session_id}] Mappings: {mappings}")
         
-        cleaned_df, rejected_df = _load_and_clean(
-            session.original_file.path, mappings, session.header_row, session_id
-        )
-        logger.info(f"[Session {session_id}] Cleaned: {len(cleaned_df)} valid, {len(rejected_df)} rejected")
+        # Prepare processed directory
+        os.makedirs(os.path.join(settings.MEDIA_ROOT, 'processed'), exist_ok=True)
+        base_name = session.sheet_name if session.sheet_name else os.path.splitext(session.original_filename)[0]
         
-        if len(cleaned_df) == 0:
+        cleaned_parquet_filename = f"processed_{base_name}.parquet"
+        cleaned_parquet_path = os.path.join(settings.MEDIA_ROOT, 'processed', cleaned_parquet_filename)
+        
+        rejected_parquet_filename = f"rejected_{base_name}.parquet"
+        rejected_parquet_path = os.path.join(settings.MEDIA_ROOT, 'processed', rejected_parquet_filename)
+
+        cleaned_count, rejected_count = _load_and_clean(
+            session.original_file.path, mappings, session.header_row, session_id,
+            cleaned_parquet_path, rejected_parquet_path
+        )
+        logger.info(f"[Session {session_id}] Cleaned: {cleaned_count} valid, {rejected_count} rejected")
+        
+        if cleaned_count == 0:
             logger.error(f"[Session {session_id}] No valid rows after cleaning")
             session.status = 'error'
             session.error_message = 'No valid rows after cleaning'
             session.save()
             return 'Error: No valid rows after cleaning'
         
-        os.makedirs(os.path.join(settings.MEDIA_ROOT, 'processed'), exist_ok=True)
-        
-        # Derive display version by renaming columns (avoids running clean_dataframe twice)
-        display_df = cleaned_df.rename(columns=DISPLAY_HEADERS)
-        if not rejected_df.empty:
-            reason_col = rejected_df['Rejection Reason']
-            display_rejected = rejected_df.drop(columns=['Rejection Reason']).rename(columns=DISPLAY_HEADERS)
-            display_rejected['Rejection Reason'] = reason_col
+        # Update path fields in UploadSession
+        session.processed_file = f"processed/{cleaned_parquet_filename}"
+        if rejected_count > 0:
+            session.rejected_file = f"processed/{rejected_parquet_filename}"
         else:
-            display_rejected = rejected_df
-        
-        # Save cleaned file (with atomic save, corruption recovery, fallback chain)
-        base_name = session.sheet_name if session.sheet_name else os.path.splitext(session.original_filename)[0]
-        processed_filename = f"processed_{base_name}.xlsx"
-        processed_path = os.path.join(settings.MEDIA_ROOT, 'processed', processed_filename)
-        
-        final_path, sheet_names = save_df_to_excel_robust(
-            display_df, processed_path, sheet_name=base_name
-        )
-        logger.info(f"[Session {session_id}] Saved processed file: {final_path} (sheets: {sheet_names})")
-        
-        # Update path in case fallback was used (relative to MEDIA_ROOT, not CWD)
-        media_root = str(settings.MEDIA_ROOT)
-        session.processed_file = os.path.relpath(final_path, media_root) if final_path != processed_path else f"processed/{processed_filename}"
-        
-        # Save rejected rows file (if any)
-        rejected_count = 0
-        if not rejected_df.empty:
-            rejected_filename = f"rejected_{base_name}.xlsx"
-            rejected_path = os.path.join(settings.MEDIA_ROOT, 'processed', rejected_filename)
-            
-            rej_final_path, rej_sheets = save_df_to_excel_robust(
-                display_rejected, rejected_path, sheet_name=f"rejected_{base_name}"
-            )
-            session.rejected_file = os.path.relpath(rej_final_path, media_root) if rej_final_path != rejected_path else f"processed/{rejected_filename}"
-            rejected_count = len(rejected_df)
-            logger.info(f"[Session {session_id}] Saved {rejected_count} rejected rows: {rej_final_path}")
-        
-        session.rows_processed = len(cleaned_df)
+            session.rejected_file = None
+
+        session.rows_processed = cleaned_count
         session.rows_rejected = rejected_count
         session.status = 'processed'
         session.save()
 
-        # Upload cleaned display data to BatchUpdate DB
+        # Upload cleaned display data to BatchUpdate DB (using fast chunked parquet streamer)
         if session.sheet_name:
             try:
-                upload_raw_to_batchupdate(display_df, session.sheet_name)
+                rows_uploaded = upload_parquet_to_batchupdate(cleaned_parquet_path, session.sheet_name)
                 session.batchupdate_uploaded = True
-                session.rows_uploaded = len(display_df)
+                session.rows_uploaded = rows_uploaded
                 session.status = 'uploaded'
                 session.save()
-                logger.info(f"[Session {session_id}] Uploaded {len(display_df)} rows to BatchUpdate table [{session.sheet_name}]")
+                logger.info(f"[Session {session_id}] Uploaded {rows_uploaded} rows to BatchUpdate table [{session.sheet_name}]")
             except Exception as e:
                 logger.error(f"[Session {session_id}] BatchUpdate upload failed: {e}", exc_info=True)
                 bu_error = f"BatchUpdate Upload Error: {str(e)}"
                 session.error_message = f"{session.error_message}\n{bu_error}".strip() if session.error_message else bu_error
                 session.save()
 
-        result = f'Complete! {len(cleaned_df)} processed, {len(display_df)} uploaded, {rejected_count} rejected'
+        result = f'Complete! {cleaned_count} processed, {session.rows_uploaded} uploaded, {rejected_count} rejected'
         logger.info(f"[Session {session_id}] {result}")
         return result
         
@@ -188,6 +299,7 @@ def process_file_task(session_id):
         session.error_message = str(e)
         session.save()
         return f'Error: {str(e)}'
+
 
 
 def cleanup_old_sessions_task():

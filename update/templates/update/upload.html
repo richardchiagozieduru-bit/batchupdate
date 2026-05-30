@@ -247,6 +247,7 @@
             <input type="file" name="excel_file" id="fileInput" accept=".xlsx,.xls,.csv">
             <div class="file-name" id="fileName"></div>
         </div>
+        <div id="passwordSection" style="display:none;margin-bottom:1rem;"></div>
         <button type="submit" class="btn submit-btn" id="submitBtn">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             Upload &amp; Continue
@@ -378,6 +379,42 @@
         }
         fileName.style.display = 'block';
         submitBtn.style.display = 'inline-flex';
+
+        const passwordSection = document.getElementById('passwordSection');
+        if (!passwordSection) return;
+
+        const excelFiles = Array.from(files).filter(f => /\.(xlsx|xls)$/i.test(f.name));
+        if (excelFiles.length === 0) {
+            passwordSection.style.display = 'none';
+            return;
+        }
+
+        passwordSection.style.display = 'block';
+
+        if (files.length === 1) {
+            // Single file — one shared field (name="excel_password")
+            passwordSection.innerHTML = `
+                <label style="display:block;font-weight:600;font-size:0.9rem;margin-bottom:0.4rem;">
+                    File Password <span style="font-weight:400;color:var(--text-muted,#64748b);">(optional — only for password-protected files)</span>
+                </label>
+                <input type="password" name="excel_password" autocomplete="off"
+                    placeholder="Leave blank if the file has no password"
+                    style="width:100%;padding:0.75rem 1rem;border:1px solid var(--border,#e2e8f0);border-radius:10px;font-size:1rem;background:white;outline:none;box-sizing:border-box;">`;
+        } else {
+            // Multiple files — one field per Excel file, labelled by filename, indexed
+            let html = `<p style="font-weight:600;font-size:0.9rem;margin:0 0 0.6rem;">File Passwords <span style="font-weight:400;color:var(--text-muted,#64748b);">(leave blank for unprotected files)</span></p>`;
+            Array.from(files).forEach((f, idx) => {
+                if (!/\.(xlsx|xls)$/i.test(f.name)) return;
+                html += `
+                <div style="margin-bottom:0.6rem;">
+                    <label style="display:block;font-size:0.85rem;color:var(--text-muted,#64748b);margin-bottom:0.25rem;">${f.name}</label>
+                    <input type="password" name="excel_password_${idx}" autocomplete="off"
+                        placeholder="Leave blank if no password"
+                        style="width:100%;padding:0.6rem 0.875rem;border:1px solid var(--border,#e2e8f0);border-radius:8px;font-size:0.95rem;background:white;outline:none;box-sizing:border-box;">
+                </div>`;
+            });
+            passwordSection.innerHTML = html;
+        }
     }
 
     // Toggle logic (admin only — element may not exist for external users)
@@ -415,6 +452,8 @@
             fileInput.value = '';
             fileName.style.display = 'none';
             submitBtn.style.display = 'none';
+            const ps = document.getElementById('passwordSection');
+            if (ps) { ps.style.display = 'none'; ps.innerHTML = ''; }
         });
     }
 

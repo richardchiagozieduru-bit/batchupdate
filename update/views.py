@@ -4,6 +4,7 @@ import json
 import logging
 import pandas as pd
 from io import BytesIO
+from django.core.files.base import ContentFile
 from django.shortcuts import render, redirect, get_object_or_404
 from django.http import HttpResponse, JsonResponse, FileResponse
 from django.contrib.auth.decorators import login_required
@@ -17,9 +18,10 @@ from django.db import transaction
 
 from openpyxl import load_workbook
 from .models import UploadSession, ColumnMapping, MappingTemplate, Subscriber
+from .columns import TARGET_COLUMN_CHOICES
 from .services import (
     clean_dataframe,
-    calculate_file_hash, read_uploaded_file,
+    calculate_file_hash, read_uploaded_file, read_excel_file,
     MAX_EXCEL_FILE_SIZE_MB, MAX_CSV_FILE_SIZE_MB,
     get_excel_sheet_names, read_uploaded_file_sheet,
     generate_sql_script, upload_raw_to_batchupdate,
@@ -73,6 +75,7 @@ def upload_view(request):
                 messages.error(request, 'No subscriber assigned. Please contact admin.')
                 return redirect('upload')
             excel_file = request.FILES['excel_file']
+            excel_password = request.POST.get('excel_password', '').strip() or None
 
             # Validate file extension
             if not excel_file.name.endswith(('.xlsx', '.xls', '.csv')):
@@ -87,11 +90,29 @@ def upload_view(request):
             if excel_file.size > max_size_mb * 1024 * 1024:
                 messages.error(request, f'File too large. Maximum size is {max_size_mb} MB for {"CSV" if is_csv else "Excel"} files.')
                 return redirect('upload')
-            
+
+            # Password decryption: if a password is supplied, decrypt the stream now
+            # so that the saved file on disk is always an unencrypted, readable workbook.
+            file_to_save = excel_file
+            if excel_password and not is_csv:
+                try:
+                    xl = read_excel_file(excel_file, excel_file.name, password=excel_password)
+                    # Re-export the decrypted workbook to a plain BytesIO so downstream
+                    # file-path readers (openpyxl / xlrd) work without a password.
+                    decrypted_buf = BytesIO()
+                    with pd.ExcelWriter(decrypted_buf, engine='openpyxl') as writer:
+                        for sheet in xl.sheet_names:
+                            xl.parse(sheet, dtype=str).to_excel(writer, sheet_name=sheet, index=False)
+                    decrypted_buf.seek(0)
+                    file_to_save = ContentFile(decrypted_buf.read(), name=excel_file.name)
+                except ValueError as exc:
+                    messages.error(request, str(exc))
+                    return redirect('upload')
+
             # Save the uploaded file temporarily to read sheets
             temp_session = UploadSession.objects.create(
                 user=request.user,
-                original_file=excel_file,
+                original_file=file_to_save,
                 original_filename=excel_file.name,
                 status='pending_mapping',
                 subscriber=subscriber,
@@ -150,7 +171,7 @@ def upload_view(request):
                     hrow = detect_header_row(file_path, template_signatures=template_signatures)
                     first_session.header_row = hrow
                     first_session.save()
-                    df = read_uploaded_file(file_path, header=hrow)
+                    df = read_uploaded_file(file_path, header=hrow, nrows=0)  # headers only — data loaded in task
                     _try_auto_map(request, first_session, df)
                     if first_session.mappings.exists():
                         return redirect('process', session_id=first_session.id)
@@ -225,11 +246,21 @@ def upload_view(request):
         else:
             # Free upload mode (admin only) — subscriber resolved from filename/sheet tab name
             excel_files = request.FILES.getlist('excel_file')
+            # Collect per-file passwords: excel_password_0, excel_password_1, …
+            # A single-file free-upload also accepts the plain excel_password name.
+            file_passwords = [
+                (request.POST.get(f'excel_password_{i}', '') or '').strip() or None
+                for i in range(len(excel_files))
+            ]
+            if all(p is None for p in file_passwords):
+                # fallback: single shared field from assigned-subscriber form
+                shared = (request.POST.get('excel_password', '') or '').strip() or None
+                file_passwords = [shared] * len(excel_files)
             template_signatures = list(
                 MappingTemplate.objects.filter(user=request.user)
                 .values_list('header_signature', flat=True)
             )
-            return _handle_free_upload(request, excel_files, template_signatures)
+            return _handle_free_upload(request, excel_files, template_signatures, file_passwords)
     
     # Group batch uploads: show one row per batch_id, individual rows for single uploads.
     # Cap at 10 entries.
@@ -283,11 +314,13 @@ def _resolve_subscriber_from_name(name_str):
     return sub_id_int, sub_name
 
 
-def _handle_free_upload(request, excel_files, template_signatures):
+def _handle_free_upload(request, excel_files, template_signatures, file_passwords=None):
     """
     Free upload mode (toggle OFF, admin only).
     Multiple files  → multi-excel mode: each filename drives its own subscriber.
     Single file     → multisheet mode: each sheet tab name drives its own subscriber.
+
+    file_passwords: list of passwords (or None) aligned by index to excel_files.
     """
     batch_id = uuid.uuid4()
     created_sessions = []
@@ -297,7 +330,7 @@ def _handle_free_upload(request, excel_files, template_signatures):
 
     if len(excel_files) > 1:
         # ── Multi-Excel mode ──────────────────────────────────────────────────
-        for f in excel_files:
+        for idx, f in enumerate(excel_files):
             sheet_name = os.path.splitext(f.name)[0]
             try:
                 sub_id_int, sub_name = _resolve_subscriber_from_name(sheet_name)
@@ -317,9 +350,25 @@ def _handle_free_upload(request, excel_files, template_signatures):
                 defaults={'subscriber_name': sub_name},
             )
 
+            # Decrypt if a password was supplied for this file
+            password = (file_passwords[idx] if file_passwords and idx < len(file_passwords) else None)
+            file_to_save = f
+            if password:
+                try:
+                    xl = read_excel_file(f, f.name, password=password)
+                    decrypted_buf = BytesIO()
+                    with pd.ExcelWriter(decrypted_buf, engine='openpyxl') as writer:
+                        for sheet in xl.sheet_names:
+                            xl.parse(sheet, dtype=str).to_excel(writer, sheet_name=sheet, index=False)
+                    decrypted_buf.seek(0)
+                    file_to_save = ContentFile(decrypted_buf.read(), name=f.name)
+                except ValueError as exc:
+                    messages.warning(request, f'Skipping "{f.name}": {exc}')
+                    continue
+
             session = UploadSession.objects.create(
                 user=request.user,
-                original_file=f,
+                original_file=file_to_save,
                 original_filename=f.name,
                 status='pending_mapping',
                 sheet_name=sheet_name,
@@ -346,7 +395,7 @@ def _handle_free_upload(request, excel_files, template_signatures):
                 hrow = detect_header_row(file_path, template_signatures=template_signatures)
                 session.header_row = hrow
                 session.save()
-                df = read_uploaded_file(file_path, header=hrow)
+                df = read_uploaded_file(file_path, header=hrow, nrows=0)  # headers only — data loaded in task
                 _try_auto_map(request, session, df)
                 if session.mappings.filter(target_column__isnull=False).exclude(target_column='').exists():
                     session.status = 'processing'
@@ -354,6 +403,13 @@ def _handle_free_upload(request, excel_files, template_signatures):
                     async_task('update.tasks.process_file_task', session.id)
             except Exception:
                 logger.warning(f"Header detection / auto-map failed for session {session.id}", exc_info=True)
+            created_sessions.append(session)
+
+        if not created_sessions:
+            logger.warning(
+                "Free upload (multi-Excel): no files processed — all filenames failed pattern check",
+                extra={'user': request.user.username},
+            )
             messages.error(request, 'No files could be processed. Check that filenames follow the pattern: subid_ddmmyyyy_name.xlsx')
             return redirect('upload')
 
@@ -371,10 +427,26 @@ def _handle_free_upload(request, excel_files, template_signatures):
             messages.error(request, 'Please upload an Excel or CSV file (.xlsx, .xls, .csv).')
             return redirect('upload')
 
+        # Decrypt if a password was supplied
+        password = (file_passwords[0] if file_passwords else None)
+        file_to_save = f
+        if password and not f.name.endswith('.csv'):
+            try:
+                xl = read_excel_file(f, f.name, password=password)
+                decrypted_buf = BytesIO()
+                with pd.ExcelWriter(decrypted_buf, engine='openpyxl') as writer:
+                    for sheet in xl.sheet_names:
+                        xl.parse(sheet, dtype=str).to_excel(writer, sheet_name=sheet, index=False)
+                decrypted_buf.seek(0)
+                file_to_save = ContentFile(decrypted_buf.read(), name=f.name)
+            except ValueError as exc:
+                messages.error(request, str(exc))
+                return redirect('upload')
+
         # Save temporarily to read sheet names
         temp_session = UploadSession.objects.create(
             user=request.user,
-            original_file=f,
+            original_file=file_to_save,
             original_filename=f.name,
             status='pending_mapping',
         )
@@ -573,7 +645,7 @@ def mapping_view(request, session_id):
         return redirect('upload')
     
     existing_mappings = {m.original_header: m.target_column for m in session.mappings.all()}
-    target_columns = ColumnMapping.TARGET_COLUMNS
+    target_columns = TARGET_COLUMN_CHOICES
     
     if request.method == 'POST':
         session.mappings.all().delete()
@@ -674,6 +746,66 @@ def result_view(request, session_id):
     })
 
 
+def _stream_parquet_as_excel(parquet_path, base_name, response):
+    """
+    Read a Parquet file and stream-write it to an Excel workbook in constant_memory mode.
+    The workbook writes directly to the response object.
+    """
+    import pyarrow.parquet as pq
+    import xlsxwriter
+    import pandas as pd
+    
+    workbook = xlsxwriter.Workbook(response, {'constant_memory': True})
+    sheet_title = base_name[:31]  # Excel sheet limit
+    ws = workbook.add_worksheet(sheet_title)
+    
+    # Setup styles
+    header_format = workbook.add_format({'bold': False})
+    text_format = workbook.add_format({'num_format': '@'})
+    numeric_format = workbook.add_format({'num_format': 'General'})
+    left_align = workbook.add_format({'align': 'left'})
+    
+    numeric_names = {'CurrentBalanceAmt', 'AmountOverdue', 'MonthsInArrears'}
+    text_names = {'LoanClassification', 'AccountStatusCode'}
+    account_no_names = {'AccountNo'}
+    
+    # Read schema/headers from the first batch
+    pf = pq.ParquetFile(parquet_path)
+    first_batch = next(pf.iter_batches(batch_size=1))
+    headers = first_batch.schema.names
+    
+    # Write headers
+    for col_idx, header in enumerate(headers):
+        ws.write(0, col_idx, header, header_format)
+        
+    # Write rows in batches
+    row_idx = 1
+    for batch in pf.iter_batches(batch_size=5000):
+        df = batch.to_pandas()
+        for row in df.itertuples(index=False):
+            for col_idx, val in enumerate(row):
+                header = headers[col_idx]
+                if pd.isna(val) or val is None:
+                    ws.write_blank(row_idx, col_idx, None)
+                    continue
+                
+                if header in account_no_names:
+                    ws.write_string(row_idx, col_idx, str(val), text_format)
+                    ws.set_cell_format(row_idx, col_idx, left_align)
+                elif header in text_names:
+                    ws.write_string(row_idx, col_idx, str(val), text_format)
+                elif header in numeric_names:
+                    try:
+                        ws.write_number(row_idx, col_idx, float(val), numeric_format)
+                    except (ValueError, TypeError):
+                        ws.write(row_idx, col_idx, val, numeric_format)
+                else:
+                    ws.write(row_idx, col_idx, val)
+            row_idx += 1
+            
+    workbook.close()
+
+
 @login_required
 def download_view(request, session_id):
     """Download processed Excel file — blocked for external users."""
@@ -689,14 +821,18 @@ def download_view(request, session_id):
     file_path = session.processed_file.path
     base_name = session.sheet_name if session.sheet_name else os.path.splitext(session.original_filename)[0]
 
-    fh = open(file_path, 'rb')
-    response = FileResponse(
-        fh,
+    response = HttpResponse(
         content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     )
     response['Content-Disposition'] = f'attachment; filename="cleaned_{base_name}.xlsx"'
-    response['Content-Length'] = os.path.getsize(file_path)
-    return response
+    
+    try:
+        _stream_parquet_as_excel(file_path, base_name, response)
+        return response
+    except Exception as e:
+        logger.error(f"Failed to stream processed Excel for session {session_id}: {e}", exc_info=True)
+        messages.error(request, f"Error generating Excel download: {str(e)}")
+        return redirect('result', session_id=session.id)
 
 
 @login_required
@@ -711,14 +847,18 @@ def download_rejected_view(request, session_id):
     file_path = session.rejected_file.path
     base_name = session.sheet_name if session.sheet_name else os.path.splitext(session.original_filename)[0]
 
-    fh = open(file_path, 'rb')
-    response = FileResponse(
-        fh,
+    response = HttpResponse(
         content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     )
     response['Content-Disposition'] = f'attachment; filename="rejected_{base_name}.xlsx"'
-    response['Content-Length'] = os.path.getsize(file_path)
-    return response
+    
+    try:
+        _stream_parquet_as_excel(file_path, f"rejected_{base_name}", response)
+        return response
+    except Exception as e:
+        logger.error(f"Failed to stream rejected Excel for session {session_id}: {e}", exc_info=True)
+        messages.error(request, f"Error generating Excel download: {str(e)}")
+        return redirect('result', session_id=session.id)
 
 
 @login_required
@@ -846,10 +986,10 @@ def batch_progress_view(request, batch_id):
 @login_required
 def download_batch_combined(request, batch_id):
     """Download all cleaned sheets from a batch as a single Excel workbook."""
-    from openpyxl import Workbook
-    from openpyxl.utils.dataframe import dataframe_to_rows
-    from .services import format_excel_sheet, to_excel_safe_sheet_name
-    import io
+    import pyarrow.parquet as pq
+    import xlsxwriter
+    import pandas as pd
+    from .services import to_excel_safe_sheet_name
 
     sessions = UploadSession.objects.filter(
         user=request.user,
@@ -860,12 +1000,27 @@ def download_batch_combined(request, batch_id):
         messages.error(request, 'Batch not found.')
         return redirect('upload')
 
-    wb = Workbook()
-    if wb.active:
-        wb.remove(wb.active)
+    response = HttpResponse(
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+    source_filename = sessions.first().source_filename or str(batch_id)
+    base_name = os.path.splitext(source_filename)[0]
+    response['Content-Disposition'] = f'attachment; filename="cleaned_{base_name}.xlsx"'
+
+    # Initialize the workbook directly on the HTTP response with constant_memory enabled
+    workbook = xlsxwriter.Workbook(response, {'constant_memory': True})
+    
+    # Setup formats
+    header_format = workbook.add_format({'bold': False})
+    text_format = workbook.add_format({'num_format': '@'})
+    numeric_format = workbook.add_format({'num_format': 'General'})
+    left_align = workbook.add_format({'align': 'left'})
+    
+    numeric_names = {'CurrentBalanceAmt', 'AmountOverdue', 'MonthsInArrears'}
+    text_names = {'LoanClassification', 'AccountStatusCode'}
+    account_no_names = {'AccountNo'}
 
     sheets_added = 0
-    source_filename = sessions.first().source_filename or str(batch_id)
 
     for session in sessions:
         if not session.processed_file:
@@ -873,43 +1028,54 @@ def download_batch_combined(request, batch_id):
         file_path = session.processed_file.path
         if not os.path.exists(file_path):
             continue
-        try:
-            df = pd.read_excel(file_path, dtype=str, engine='openpyxl')
-        except Exception:
-            continue
-
-        # Restore numeric columns to actual numbers so General-formatted cells
-        # are right-aligned (matching individual download behaviour).
-        # Text columns (AccountNo, LoanClassification, AccountStatusCode) stay as strings.
-        _numeric_cols = [
-            'CurrentBalanceAmt', 'AmountOverdue', 'MonthsInArrears',
-            'overdue_amount', 'months_in_arrears',
-        ]
-        for _col in _numeric_cols:
-            if _col in df.columns:
-                df[_col] = pd.to_numeric(df[_col], errors='coerce')
 
         sheet_title = to_excel_safe_sheet_name(session.sheet_name or session.original_filename)
-        ws = wb.create_sheet(title=sheet_title)
-        for row in dataframe_to_rows(df, index=False, header=True):
-            ws.append(row)
-        format_excel_sheet(ws)
-        sheets_added += 1
+        ws = workbook.add_worksheet(sheet_title)
+        
+        try:
+            pf = pq.ParquetFile(file_path)
+            first_batch = next(pf.iter_batches(batch_size=1))
+            headers = first_batch.schema.names
+            
+            # Write headers
+            for col_idx, header in enumerate(headers):
+                ws.write(0, col_idx, header, header_format)
+                
+            # Write rows
+            row_idx = 1
+            for batch in pf.iter_batches(batch_size=5000):
+                df = batch.to_pandas()
+                for row in df.itertuples(index=False):
+                    for col_idx, val in enumerate(row):
+                        header = headers[col_idx]
+                        if pd.isna(val) or val is None:
+                            ws.write_blank(row_idx, col_idx, None)
+                            continue
+                        
+                        if header in account_no_names:
+                            ws.write_string(row_idx, col_idx, str(val), text_format)
+                            ws.set_cell_format(row_idx, col_idx, left_align)
+                        elif header in text_names:
+                            ws.write_string(row_idx, col_idx, str(val), text_format)
+                        elif header in numeric_names:
+                            try:
+                                ws.write_number(row_idx, col_idx, float(val), numeric_format)
+                            except (ValueError, TypeError):
+                                ws.write(row_idx, col_idx, val, numeric_format)
+                        else:
+                            ws.write(row_idx, col_idx, val)
+                    row_idx += 1
+            sheets_added += 1
+        except Exception as e:
+            logger.error(f"Failed to add sheet '{sheet_title}' to combined batch combined download: {e}", exc_info=True)
+            continue
 
     if sheets_added == 0:
+        workbook.close()
         messages.error(request, 'No processed sheets available yet. Complete mapping and processing first.')
         return redirect('batch', batch_id=batch_id)
 
-    base_name = os.path.splitext(source_filename)[0]
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-
-    response = HttpResponse(
-        buffer.read(),
-        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    )
-    response['Content-Disposition'] = f'attachment; filename="cleaned_{base_name}.xlsx"'
+    workbook.close()
     return response
 
 
@@ -976,7 +1142,7 @@ def batch_mapping_view(request, batch_id):
             'already_mapped': False,
         })
 
-    target_columns = ColumnMapping.TARGET_COLUMNS
+    target_columns = TARGET_COLUMN_CHOICES
 
     if request.method == 'POST':
         sessions_to_process = []

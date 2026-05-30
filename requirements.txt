@@ -5,3 +5,4 @@ pyodbc>=5.0
 mssql-django>=1.4
 django-q2>=1.6
 python-dotenv>=1.0
+msoffcrypto-tool>=5.0
