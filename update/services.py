@@ -1,9 +1,11 @@
+import io
 import os
 import re
 import hashlib
 import logging
 import warnings
 import zipfile
+import msoffcrypto
 import pyodbc
 import numpy as np
 import pandas as pd
@@ -52,6 +54,10 @@ def detect_header_row(file_path, sheet_name=None, template_signatures=None, max_
             kw = dict(header=None, nrows=max_scan_rows, dtype=str)
             if ext == '.csv':
                 raw = pd.read_csv(file_path, **kw)
+            elif ext == '.xlsb':
+                if sheet_name:
+                    kw['sheet_name'] = sheet_name
+                raw = pd.read_excel(file_path, engine='pyxlsb', **kw)
             elif ext == '.xlsx':
                 if sheet_name:
                     kw['sheet_name'] = sheet_name
@@ -79,7 +85,7 @@ def detect_header_row(file_path, sheet_name=None, template_signatures=None, max_
     # ── Step 1: exact template-signature match ──
     for row_idx in range(min(n_rows, max_scan_rows)):
         candidate = raw.iloc[row_idx].astype(str).str.strip().tolist()
-        candidate_clean = [v for v in candidate if v and v.lower() not in ('nan', 'none', '')]
+        candidate_clean = [s for s in (str(v).strip() for v in candidate) if s and s.lower() not in ('nan', 'none', '')]
         if not candidate_clean:
             continue
         sig = _json.dumps(sorted(candidate_clean))
@@ -93,7 +99,7 @@ def detect_header_row(file_path, sheet_name=None, template_signatures=None, max_
 
     for row_idx in range(scan_limit + 1):
         row_vals = raw.iloc[row_idx].astype(str).str.strip().tolist()
-        non_empty = [v for v in row_vals if v and v.lower() not in ('nan', 'none', '')]
+        non_empty = [s for s in (str(v).strip() for v in row_vals) if s and s.lower() not in ('nan', 'none', '')]
         if not non_empty:
             continue
 
@@ -106,7 +112,7 @@ def detect_header_row(file_path, sheet_name=None, template_signatures=None, max_
             score += 3
         if row_idx + 1 < n_rows:                     # next row has a numeric value
             nxt = raw.iloc[row_idx + 1].astype(str).str.strip().tolist()
-            if any(_is_numeric(v) for v in nxt if v and v.lower() not in ('nan', 'none', '')):
+            if any(_is_numeric(s) for s in (str(v).strip() for v in nxt) if s and s.lower() not in ('nan', 'none', '')):
                 score += 3
         if row_idx == 0:                             # tiebreaker: prefer row 0
             score += 1
@@ -118,26 +124,182 @@ def detect_header_row(file_path, sheet_name=None, template_signatures=None, max_
     return best_row
 
 
-def read_uploaded_file(file_path, header=0):
-    """Read CSV or Excel file into a DataFrame with engine auto-detection."""
+def read_excel_file(uploaded_file, filename: str, password: str | None = None) -> pd.ExcelFile:
+    """Read an uploaded Excel stream into a pd.ExcelFile, with optional password decryption.
+
+    Args:
+        uploaded_file: A file-like object (e.g. Django InMemoryUploadedFile or BytesIO).
+        filename:      Original filename, used to select the correct engine.
+        password:      Optional workbook password for encrypted Excel files.
+
+    Returns:
+        pd.ExcelFile ready for sheet inspection or DataFrame extraction.
+
+    Raises:
+        ValueError: If the password is wrong or the file is corrupt.
+    """
+    uploaded_file.seek(0)
+    source_stream = uploaded_file
+
+    if password:
+        try:
+            decrypted = io.BytesIO()
+            office_file = msoffcrypto.OfficeFile(uploaded_file)
+            office_file.load_key(password=password)
+            office_file.decrypt(decrypted)
+            decrypted.seek(0)
+            source_stream = decrypted
+        except Exception as e:
+            raise ValueError("Incorrect password or the file is not encrypted.") from e
+
+    try:
+        if filename.lower().endswith(".xls"):
+            return pd.ExcelFile(source_stream, engine="xlrd")
+        if filename.lower().endswith(".xlsb"):
+            return pd.ExcelFile(source_stream, engine="pyxlsb")
+        return pd.ExcelFile(source_stream, engine="openpyxl")
+    except zipfile.BadZipFile as e:
+        raise ValueError("The Excel file is invalid or corrupt (not a valid zip-based workbook).") from e
+
+
+def read_uploaded_file(file_path, header=0, nrows=None):
+    """Read CSV or Excel file into a DataFrame with engine auto-detection.
+
+    Pass nrows=0 to read only the header row (useful for column inspection
+    without loading all data into memory).
+    """
     ext = os.path.splitext(file_path)[1].lower()
-    logger.info(f"Reading file: {file_path} (extension: {ext}, header_row={header})")
-    
+    logger.info(f"Reading file: {file_path} (extension: {ext}, header_row={header}, nrows={nrows})")
+
     with warnings.catch_warnings():
         warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
         if ext == '.csv':
-            return pd.read_csv(file_path, dtype=str, header=header)
+            kw = dict(dtype=str, header=header)
+            if nrows is not None:
+                kw['nrows'] = nrows
+            return pd.read_csv(file_path, **kw)
         elif ext == '.xlsx':
-            return pd.read_excel(file_path, dtype=str, engine='openpyxl', header=header)
+            kw = dict(dtype=str, engine='openpyxl', header=header)
+            if nrows is not None:
+                kw['nrows'] = nrows
+            return pd.read_excel(file_path, **kw)
         elif ext == '.xls':
-            return pd.read_excel(file_path, dtype=str, engine='xlrd', header=header)
+            kw = dict(dtype=str, engine='xlrd', header=header)
+            if nrows is not None:
+                kw['nrows'] = nrows
+            return pd.read_excel(file_path, **kw)
+        elif ext == '.xlsb':
+            kw = dict(dtype=str, engine='pyxlsb', header=header)
+            if nrows is not None:
+                kw['nrows'] = nrows
+            return pd.read_excel(file_path, **kw)
         else:
-            # Try openpyxl first, fall back to xlrd
+            kw = dict(dtype=str, header=header)
+            if nrows is not None:
+                kw['nrows'] = nrows
             try:
-                return pd.read_excel(file_path, dtype=str, engine='openpyxl', header=header)
+                return pd.read_excel(file_path, engine='openpyxl', **kw)
             except Exception:
                 logger.warning(f"openpyxl failed for {file_path}, trying xlrd")
-                return pd.read_excel(file_path, dtype=str, engine='xlrd', header=header)
+                return pd.read_excel(file_path, engine='xlrd', **kw)
+
+
+def _zero_mask_width(number_format):
+    """
+    Return the number of '0' placeholders in a zero-mask number format, or None.
+
+    A zero-mask is a format built entirely of '0' digits plus separators (dashes,
+    spaces, parentheses), e.g. '000000', '0000-000000', '(000) 000-0000'.
+    These formats prove a fixed display width with mandatory leading zeros.
+
+    Formats containing '#', '.', '%', 'E', or 'e' are NOT zero-masks and return None.
+    """
+    if not number_format or number_format in ('General', '@', ''):
+        return None
+    fmt = number_format
+    fmt = re.sub(r'"[^"]*"', '', fmt)   # remove quoted literals
+    fmt = re.sub(r'\\.', '', fmt)        # remove backslash-escaped chars
+    if re.search(r'[#.%eE]', fmt):
+        return None
+    zeros = fmt.count('0')
+    return zeros if zeros > 0 else None
+
+
+def _reconstruct_account_value(cell_value, data_type, number_format):
+    """
+    Reconstruct a single account number string from an openpyxl cell's value and style.
+
+    - Text cells (data_type 's'): returned as-is — leading zeros already present.
+    - Numeric cells with a zero-mask format (e.g. '000000'): left-padded with zeros
+      to the mask width.
+    - Numeric cells without a zero-mask: returned as plain string — no guessing.
+    - None values: returned as None.
+    """
+    if cell_value is None:
+        return None
+    if data_type == 's':
+        return str(cell_value)
+    if data_type == 'n' and number_format:
+        width = _zero_mask_width(number_format)
+        if width is not None:
+            try:
+                return str(int(float(cell_value))).zfill(width)
+            except (ValueError, TypeError):
+                pass
+    return str(cell_value)
+
+
+def read_account_column_styled(file_path, sheet_name, header_row, col_name):
+    """
+    Read one column from an .xlsx file with full cell-style awareness to recover
+    leading zeros that pandas strips during value-only ingestion.
+
+    For each data cell (below the header row):
+      - Text cell (data_type='s'): kept as-is.
+      - Numeric cell with a zero-mask format (e.g. '000000'): left-padded to mask width.
+      - Numeric cell with no zero-mask: returned as plain string (no guessing).
+
+    Returns a list of strings aligned to the data rows (header excluded), or None if
+    the file is not .xlsx, the column is not found, or the workbook cannot be opened.
+
+    Note: opens the workbook in full (non-read-only) mode to access cell styles.
+    For large files this temporarily uses more RAM than the streaming path; this is
+    the unavoidable cost of reading style metadata.
+    """
+    if os.path.splitext(file_path)[1].lower() != '.xlsx':
+        return None
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+        try:
+            wb = load_workbook(file_path, data_only=True)
+        except Exception as exc:
+            logger.warning(f"read_account_column_styled: could not open {file_path}: {exc}")
+            return None
+        try:
+            ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+            header_row_1 = header_row + 1  # openpyxl rows are 1-based
+            # Locate the target column by matching the header cell value
+            col_idx = None
+            for cell in ws[header_row_1]:
+                if cell.value == col_name:
+                    col_idx = cell.column - 1  # convert to 0-based
+                    break
+            if col_idx is None:
+                logger.debug(f"read_account_column_styled: '{col_name}' not found in row {header_row_1}")
+                return None
+            result = []
+            for row in ws.iter_rows(min_row=header_row_1 + 1):
+                cell = row[col_idx] if col_idx < len(row) else None
+                result.append(
+                    _reconstruct_account_value(cell.value, cell.data_type, cell.number_format)
+                    if cell is not None else None
+                )
+            logger.info(
+                f"read_account_column_styled: '{col_name}' — {len(result)} rows read from {file_path}"
+            )
+            return result
+        finally:
+            wb.close()
 
 
 # Configuration
@@ -152,6 +314,7 @@ LARGE_FILE_THRESHOLD_MB = 50   # xlsx files over this are converted to CSV befor
 CSV_CHUNK_SIZE = 50_000         # rows per chunk during CSV processing
 
 # Target column metadata — single source of truth in update/columns.py
+# pyrefly: ignore [missing-import]
 from .columns import (
     NUMERIC_COLUMNS, TEXT_COLUMNS, STRING_COLUMNS,
     VALIDATION_RULES, DISPLAY_HEADERS,
@@ -171,7 +334,7 @@ LOAN_CLASSIFICATION_MAP = {
     'Watchlist': ['002', 'watchlist', '02', '2', 'pass and watch', 'passwatch', 'pass watch', 
                   'paasandwatch', 'pw', 'p&w', 'passandwatch'],
     'Sub standard': ['003', 'sub standard', 'substandard', '03', '3', 'sub', 'subs', 
-                     'substandardloans', 'substandardadvances'],
+                     'substandardloans', 'substandardadvances', 'subsdtand'],
     'Doubtful': ['004', 'doubtful', '04', '4', 'very doubtful', 'verydoubtful', 'doub', 'doubt', 
                  'doubtfulloans', 'doubtfuladvances'],
     'Lost': ['005', 'lost', '05', '5', 'loss', 'l'],
@@ -252,7 +415,7 @@ def clean_value(value, column_name):
             # CurrentBalanceAmt and overdue_amount keep decimal precision
             # months_in_arrears is always a whole number
             if column_name in ('CurrentBalanceAmt', 'overdue_amount'):
-                result = float_val
+                result = round(float_val, 2)
             else:
                 result = int(float_val)
 
@@ -386,6 +549,9 @@ def apply_business_rules(df, mapped_columns, all_columns=None):
     
     days_numeric = pd.to_numeric(df['months_in_arrears'], errors='coerce')
 
+    # ── Account number empty check (only when account_number was mapped) ──
+    account_empty = _is_empty(df['account_number']) if 'account_number' in mapped_columns else pd.Series(False, index=df.index)
+
     # ── Cross-field rule: "Closed"/"Cloed" in loan_classification → remap ──
     lc_lower = df['loan_classification'].astype(str).str.lower().str.strip()
     closed_mask = lc_lower.isin(['closed', 'cloed']) & ~classification_empty
@@ -404,8 +570,18 @@ def apply_business_rules(df, mapped_columns, all_columns=None):
         overdue_empty = overdue_empty & ~r2a_mask
         logger.info(f"Auto-filled overdue_amount=0 for {r2a_mask.sum()} rows (balance>0, months_in_arrears=0)")
 
+    # ── Rule 2a-2: balance > 0, overdue == 0, months_in_arrears missing → fill months = 0 ──
+    # (If overdue > 0 and months is missing, the row will be rejected by Rule 2 below)
+    overdue_numeric_r2 = pd.to_numeric(df['overdue_amount'], errors='coerce')
+    r2a2_mask = bal_positive & days_empty & (overdue_numeric_r2 == 0)
+    if r2a2_mask.any():
+        df.loc[r2a2_mask, 'months_in_arrears'] = 0
+        days_empty = days_empty & ~r2a2_mask
+        days_numeric = pd.to_numeric(df['months_in_arrears'], errors='coerce')
+        logger.info(f"Auto-filled months_in_arrears=0 for {r2a2_mask.sum()} rows (balance>0, overdue=0, months missing)")
+
     # ── Rule 2b: balance > 0, months_in_arrears == 0, overdue == 0 → force Performing + Open ──
-    # Re-read overdue after Rule 2a may have just auto-filled zeros
+    # Re-read overdue after Rule 2a/2a-2 may have just auto-filled zeros
     overdue_numeric = pd.to_numeric(df['overdue_amount'], errors='coerce')
     performing_open_mask = bal_positive & (days_numeric == 0) & (overdue_numeric == 0)
     if performing_open_mask.any():
@@ -417,6 +593,34 @@ def apply_business_rules(df, mapped_columns, all_columns=None):
         logger.info(
             f"Auto-corrected {performing_open_mask.sum()} rows: "
             f"balance>0, months_in_arrears=0, overdue=0 → loan_classification=Performing, account_status_code=Open"
+        )
+
+    # ── Rule 2c: months_in_arrears > 0, currentbalance == 0, overdue == 0 → Lost + Closed ──
+    r2c_mask = (days_numeric > 0) & (balance == 0) & (overdue_numeric == 0)
+    if r2c_mask.any():
+        df.loc[r2c_mask, 'loan_classification'] = 'Lost'
+        df.loc[r2c_mask, 'account_status_code'] = 'Closed'
+        classification_empty = classification_empty & ~r2c_mask
+        status_empty = status_empty & ~r2c_mask
+        logger.info(
+            f"Auto-corrected {r2c_mask.sum()} rows: "
+            f"months_in_arrears>0, balance=0, overdue=0 → loan_classification=Lost, account_status_code=Closed"
+        )
+
+    # ── Rule 2d: currentbalance > 0, overdue > 0, currentbalance == overdue, months_in_arrears > 0 → Watchlist + Open (with exceptions) ──
+    r2d_mask = bal_positive & (overdue_numeric > 0) & (balance == overdue_numeric) & (days_numeric > 0)
+    if r2d_mask.any():
+        lc_lower = df['loan_classification'].astype(str).str.lower().str.strip()
+        exceptions = {'lost', 'loss', 'performing', 'watchlist', 'subsdtand', 'substandard', 'sub standard', 'doubtful'}
+        to_change_mask = r2d_mask & ~lc_lower.isin(exceptions)
+        if to_change_mask.any():
+            df.loc[to_change_mask, 'loan_classification'] = 'Watchlist'
+            df.loc[to_change_mask, 'account_status_code'] = 'Open'
+            classification_empty = classification_empty & ~to_change_mask
+            status_empty = status_empty & ~to_change_mask
+        logger.info(
+            f"Auto-corrected {to_change_mask.sum()} rows: "
+            f"currentbalance == overdue (both >0) and months_in_arrears > 0 → loan_classification=Watchlist, account_status_code=Open (excluding exceptions)"
         )
 
     # ── Rule 2: balance > 0 but critical fields still empty → reject ──
@@ -450,16 +654,50 @@ def apply_business_rules(df, mapped_columns, all_columns=None):
         df.loc[fill_status, 'account_status_code'] = 'Closed'
         logger.info(f"Auto-filled account_status_code=Closed for {fill_status.sum()} rows (balance=0)")
 
+    # ── Rule 3c: balance=0, overdue=0, months_in_arrears > 0 → correct months to 0 ──
+    overdue_after3 = pd.to_numeric(df['overdue_amount'], errors='coerce')
+    days_after3 = pd.to_numeric(df['months_in_arrears'], errors='coerce')
+    r3c_mask = bal_zero & (overdue_after3 == 0) & (days_after3 > 0)
+    if r3c_mask.any():
+        df.loc[r3c_mask, 'months_in_arrears'] = 0
+        logger.info(f"Auto-corrected months_in_arrears to 0 for {r3c_mask.sum()} rows (balance=0, overdue=0, months>0)")
+
     # ── Rule 4: balance is zero or missing but overdue_amount > 0 → reject ──
     # Re-read overdue after all auto-fills so Rule 3 zeros are accounted for
     overdue_final = pd.to_numeric(df['overdue_amount'], errors='coerce')
     reject_zero_bal_with_overdue = (bal_zero | original_empty | balance.isna()) & (overdue_final > 0)
+
+    # ── Rule 5: account_number is missing → reject ──
+    reject_missing_acct = account_empty
+
+    # ── Rules 6 & 7: cross-field overdue vs balance checks (re-read after all auto-fills) ──
+    overdue_final_pre = pd.to_numeric(df['overdue_amount'], errors='coerce')
+    days_empty_final = _is_empty(df['months_in_arrears'])
+
+    # Rule 6: balance == overdue (same non-zero value) and months_in_arrears missing → reject
+    reject_equal_no_months = (
+        balance.notna() & overdue_final_pre.notna() &
+        (balance > 0) &
+        (balance == overdue_final_pre) &
+        days_empty_final
+    )
+
+    # Rule 7: overdue > balance (strictly greater, not equal) → reject
+    # reject_overdue_exceeds_balance = (
+    #     balance.notna() & overdue_final_pre.notna() &
+    #     (overdue_final_pre > balance) &
+    #     (overdue_final_pre != balance)
+    # )
+    reject_overdue_exceeds_balance = pd.Series(False, index=df.index)  # temporarily disabled
 
     # ── Build rejection reasons ──
     reasons = pd.Series('', index=df.index)
     reasons = reasons.where(~reject_empty, 'Current Balance Amount is empty')
     reasons = reasons.where(~reject_nan, 'Current Balance Amount is not a valid number')
     reasons = reasons.where(~reject_zero_bal_with_overdue, 'AmountOverdue > 0 but CurrentBalanceAmt is zero or missing')
+    reasons = reasons.where(~reject_missing_acct, 'AccountNo is missing')
+    reasons = reasons.where(~reject_equal_no_months, 'AmountOverdue equals CurrentBalanceAmt but MonthsInArrears is missing')
+    # reasons = reasons.where(~reject_overdue_exceeds_balance, 'AmountOverdue exceeds CurrentBalanceAmt')  # Rule 7 temporarily disabled
     
     # Build "missing: x, y, z" reasons for balance > 0 rejections
     reject_bal_only = reject_bal_positive & ~reject_empty & ~reject_nan
@@ -483,13 +721,22 @@ def apply_business_rules(df, mapped_columns, all_columns=None):
             )
 
     # ── Split valid / rejected ──
-    all_reject = reject_empty | reject_nan | reject_bal_positive | reject_zero_bal_with_overdue
+    all_reject = (
+        reject_empty | reject_nan | reject_bal_positive | reject_zero_bal_with_overdue |
+        reject_missing_acct | reject_equal_no_months | reject_overdue_exceeds_balance
+    )
     
     if all_reject.any():
         rejected_df = df.loc[all_reject].copy()
         rejected_df['Rejection Reason'] = reasons[all_reject]
         df = df.loc[~all_reject]
-        logger.info(f"Rejected {all_reject.sum()} rows total ({reject_empty.sum()} empty, {reject_nan.sum()} non-numeric, {reject_bal_positive.sum()} missing fields, {reject_zero_bal_with_overdue.sum()} zero-balance with overdue)")
+        logger.info(
+            f"Rejected {all_reject.sum()} rows total ("
+            f"{reject_empty.sum()} empty balance, {reject_nan.sum()} non-numeric, "
+            f"{reject_bal_positive.sum()} missing fields, {reject_zero_bal_with_overdue.sum()} zero-balance with overdue, "
+            f"{reject_missing_acct.sum()} missing account, {reject_equal_no_months.sum()} equal balance/overdue no months, "
+            f"{reject_overdue_exceeds_balance.sum()} overdue>balance)"
+        )
     else:
         rejected_df = pd.DataFrame()
     
@@ -685,8 +932,11 @@ def get_excel_sheet_names(file_path):
     if ext == '.csv':
         return None
     try:
-        xl = pd.ExcelFile(file_path)
-        return xl.sheet_names
+        engine = 'pyxlsb' if ext == '.xlsb' else ('xlrd' if ext == '.xls' else 'openpyxl')
+        xl = pd.ExcelFile(file_path, engine=engine)
+        names = xl.sheet_names
+        xl.close()
+        return names
     except Exception:
         return None
 
@@ -702,6 +952,8 @@ def read_uploaded_file_sheet(file_path, sheet_name=None, header=0):
             return pd.read_excel(file_path, sheet_name=sheet_name, dtype=str, engine='openpyxl', header=header)
         elif ext == '.xls':
             return pd.read_excel(file_path, sheet_name=sheet_name, dtype=str, engine='xlrd', header=header)
+        elif ext == '.xlsb':
+            return pd.read_excel(file_path, sheet_name=sheet_name, dtype=str, engine='pyxlsb', header=header)
         else:
             try:
                 return pd.read_excel(file_path, sheet_name=sheet_name, dtype=str, engine='openpyxl', header=header)
@@ -759,7 +1011,7 @@ def extract_sub_id(sheet_name):
     return ''
 
 
-def build_sheet_name(subscriber, date=None, index=None):
+def build_sheet_name(subscriber, date=None, index=None, name_override=None):
     """
     Build a normalised sheet name from a Subscriber instance.
     Pattern: {subscriber_id}_{ddmmyyyy}_{subscriber_name_lower}
@@ -769,12 +1021,14 @@ def build_sheet_name(subscriber, date=None, index=None):
         subscriber: Subscriber model instance
         date: datetime.date or datetime.datetime; defaults to today
         index: int or None — if provided and >= 2, appended as suffix
+        name_override: str or None — if provided, overrides subscriber.subscriber_name
     Returns:
         str sheet name safe for use as Excel sheet name and SQL table name
     """
     from datetime import date as _date
     d = date or _date.today()
-    base = f"{subscriber.subscriber_id}_{d.strftime('%d%m%Y')}_{subscriber.subscriber_name.lower()}"
+    sub_name = name_override if name_override else subscriber.subscriber_name
+    base = f"{subscriber.subscriber_id}_{d.strftime('%d%m%Y')}_{sub_name.lower()}"
     if index is not None and index >= 2:
         base = f"{base}_{index}"
     return base
@@ -899,3 +1153,79 @@ def upload_raw_to_batchupdate(df, table_name):
     finally:
         cursor.close()
         conn.close()
+
+
+def should_use_chunking(file_path):
+    """
+    Decide whether to use chunked processing based on file type and disk size.
+    - Excel: Chunk if size > 15MB (~50,000 rows in Openpyxl memory model)
+    - CSV: Chunk if size > 30MB (~200,000 rows in plain CSV)
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+    try:
+        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+    except OSError:
+        return False
+
+    if ext in ('.xlsx', '.xls', '.xlsb'):
+        return file_size_mb > 15
+    else:
+        return file_size_mb > 30
+
+
+def upload_parquet_to_batchupdate(parquet_path, table_name):
+    """
+    Read a Parquet file in chunks and stream-upload it to the BatchUpdate database.
+    Prevents memory spikes by iterating over Arrow record batches.
+    """
+    import pyarrow.parquet as pq
+    from .columns import COLUMN_SQL_TYPES
+
+    conn = get_batchupdate_connection()
+    cursor = conn.cursor()
+    cursor.fast_executemany = True
+
+    # Escape ] as ]] to prevent bracket-identifier injection (both table name and column names)
+    safe_table = table_name.replace("]", "]]").replace("'", "''")
+
+    try:
+        # Drop table if exists
+        cursor.execute(f"IF OBJECT_ID('[{safe_table}]', 'U') IS NOT NULL DROP TABLE [{safe_table}]")
+        conn.commit()
+
+        # Open the Parquet file and read headers from the first batch
+        parquet_file = pq.ParquetFile(parquet_path)
+        first_batch = next(parquet_file.iter_batches(batch_size=1))
+        columns = first_batch.schema.names
+
+        # Build CREATE TABLE using proper types for known columns, NVARCHAR(255) for others
+        col_defs = ', '.join(
+            f'[{col.replace("]", "]]")}] {COLUMN_SQL_TYPES.get(col, "NVARCHAR(255)")}'
+            for col in columns
+        )
+        cursor.execute(f"CREATE TABLE [{safe_table}] ({col_defs})")
+        conn.commit()
+
+        # Bulk insert using executemany with fast_executemany enabled
+        placeholders = ', '.join(['?'] * len(columns))
+        insert_sql = f"INSERT INTO [{safe_table}] VALUES ({placeholders})"
+
+        # Stream batches into the database
+        for batch in parquet_file.iter_batches(batch_size=5000):
+            df = batch.to_pandas()
+            # Convert NaN to None for SQL NULL
+            data = df.where(df.notna(), None).values.tolist()
+            cursor.executemany(insert_sql, data)
+            conn.commit()
+
+        logger.info(f"Stream-uploaded Parquet to BatchUpdate table [{safe_table}]")
+        return parquet_file.metadata.num_rows
+
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Parquet BatchUpdate upload failed for [{safe_table}]: {e}", exc_info=True)
+        raise
+    finally:
+        cursor.close()
+        conn.close()
+

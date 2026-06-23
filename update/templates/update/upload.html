@@ -168,7 +168,7 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
         </div>
         <div>
-            <div class="stat-value">{{ sessions|length }}</div>
+            <div class="stat-value">{{ total_count }}</div>
             <div class="stat-label">Total Uploads</div>
         </div>
     </div>
@@ -177,7 +177,7 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
         </div>
         <div>
-            <div class="stat-value" id="statUploaded">0</div>
+            <div class="stat-value">{{ uploaded_count }}</div>
             <div class="stat-label">Uploaded to SQL</div>
         </div>
     </div>
@@ -186,7 +186,7 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
         </div>
         <div>
-            <div class="stat-value" id="statPending">0</div>
+            <div class="stat-value">{{ pending_count }}</div>
             <div class="stat-label">Pending</div>
         </div>
     </div>
@@ -195,7 +195,7 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
         </div>
         <div>
-            <div class="stat-value" id="statError">0</div>
+            <div class="stat-value">{{ error_count }}</div>
             <div class="stat-label">Errors</div>
         </div>
     </div>
@@ -243,10 +243,11 @@
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             </div>
             <h3 id="dropZoneTitle">Drop your file here</h3>
-            <p id="dropZoneHint">or click to browse &mdash; .xlsx, .xls, .csv</p>
-            <input type="file" name="excel_file" id="fileInput" accept=".xlsx,.xls,.csv">
+            <p id="dropZoneHint">or click to browse &mdash; .xlsx, .xls, .xlsb, .csv</p>
+            <input type="file" name="excel_file" id="fileInput" accept=".xlsx,.xls,.xlsb,.csv">
             <div class="file-name" id="fileName"></div>
         </div>
+        <div id="passwordSection" style="display:none;margin-bottom:1rem;"></div>
         <button type="submit" class="btn submit-btn" id="submitBtn">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             Upload &amp; Continue
@@ -378,6 +379,42 @@
         }
         fileName.style.display = 'block';
         submitBtn.style.display = 'inline-flex';
+
+        const passwordSection = document.getElementById('passwordSection');
+        if (!passwordSection) return;
+
+        const excelFiles = Array.from(files).filter(f => /\.(xlsx|xls|xlsb)$/i.test(f.name));
+        if (excelFiles.length === 0) {
+            passwordSection.style.display = 'none';
+            return;
+        }
+
+        passwordSection.style.display = 'block';
+
+        if (files.length === 1) {
+            // Single file — one shared field (name="excel_password")
+            passwordSection.innerHTML = `
+                <label style="display:block;font-weight:600;font-size:0.9rem;margin-bottom:0.4rem;">
+                    File Password <span style="font-weight:400;color:var(--text-muted,#64748b);">(optional — only for password-protected files)</span>
+                </label>
+                <input type="password" name="excel_password" autocomplete="off"
+                    placeholder="Leave blank if the file has no password"
+                    style="width:100%;padding:0.75rem 1rem;border:1px solid var(--border,#e2e8f0);border-radius:10px;font-size:1rem;background:white;outline:none;box-sizing:border-box;">`;
+        } else {
+            // Multiple files — one field per Excel file, labelled by filename, indexed
+            let html = `<p style="font-weight:600;font-size:0.9rem;margin:0 0 0.6rem;">File Passwords <span style="font-weight:400;color:var(--text-muted,#64748b);">(leave blank for unprotected files)</span></p>`;
+            Array.from(files).forEach((f, idx) => {
+                if (!/\.(xlsx|xls|xlsb)$/i.test(f.name)) return;
+                html += `
+                <div style="margin-bottom:0.6rem;">
+                    <label style="display:block;font-size:0.85rem;color:var(--text-muted,#64748b);margin-bottom:0.25rem;">${f.name}</label>
+                    <input type="password" name="excel_password_${idx}" autocomplete="off"
+                        placeholder="Leave blank if no password"
+                        style="width:100%;padding:0.6rem 0.875rem;border:1px solid var(--border,#e2e8f0);border-radius:8px;font-size:0.95rem;background:white;outline:none;box-sizing:border-box;">
+                </div>`;
+            });
+            passwordSection.innerHTML = html;
+        }
     }
 
     // Toggle logic (admin only — element may not exist for external users)
@@ -399,7 +436,7 @@
                 document.getElementById('subscriber').setAttribute('required', 'required');
                 fileInput.removeAttribute('multiple');
                 dropZoneTitle.textContent = 'Drop your file here';
-                dropZoneHint.innerHTML = 'or click to browse &mdash; .xlsx, .xls, .csv';
+                dropZoneHint.innerHTML = 'or click to browse &mdash; .xlsx, .xls, .xlsb, .csv';
                 toggleLabel.textContent = 'Assign Subscriber';
             } else {
                 // Free upload mode
@@ -415,22 +452,11 @@
             fileInput.value = '';
             fileName.style.display = 'none';
             submitBtn.style.display = 'none';
+            const ps = document.getElementById('passwordSection');
+            if (ps) { ps.style.display = 'none'; ps.innerHTML = ''; }
         });
     }
 
-    // Populate stat counters from the table rows
-    (function() {
-        var uploaded = 0, pending = 0, errors = 0;
-        document.querySelectorAll('.status-badge').forEach(function(b) {
-            var cls = b.className;
-            if (cls.indexOf('status-uploaded') !== -1 || cls.indexOf('status-processed') !== -1) uploaded++;
-            else if (cls.indexOf('status-pending_mapping') !== -1 || cls.indexOf('status-processing') !== -1) pending++;
-            else if (cls.indexOf('status-error') !== -1) errors++;
-        });
-        var u = document.getElementById('statUploaded'); if (u) u.textContent = uploaded;
-        var p = document.getElementById('statPending');  if (p) p.textContent = pending;
-        var e = document.getElementById('statError');    if (e) e.textContent = errors;
-    })();
 
     // Loading spinner on submit
     document.getElementById('uploadForm').addEventListener('submit', function () {

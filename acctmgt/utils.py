@@ -1,7 +1,11 @@
 """Shared helper utilities for acctmgt — safe to import from any app."""
 from functools import wraps
 from django.core.cache import cache
-from django.http import HttpResponseTooManyRequests
+from django.http import HttpResponse
+
+
+class HttpResponseTooManyRequests(HttpResponse):
+    status_code = 429
 
 
 def is_external(user):

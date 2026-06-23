@@ -1,9 +1,11 @@
 import os
+import shutil
 import uuid
 import json
 import logging
 import pandas as pd
 from io import BytesIO
+from django.core.files.base import ContentFile
 from django.shortcuts import render, redirect, get_object_or_404
 from django.http import HttpResponse, JsonResponse, FileResponse
 from django.contrib.auth.decorators import login_required
@@ -17,9 +19,10 @@ from django.db import transaction
 
 from openpyxl import load_workbook
 from .models import UploadSession, ColumnMapping, MappingTemplate, Subscriber
+from .columns import TARGET_COLUMN_CHOICES, HEADER_MAPPING_DICTIONARY
 from .services import (
     clean_dataframe,
-    calculate_file_hash, read_uploaded_file,
+    calculate_file_hash, read_uploaded_file, read_excel_file,
     MAX_EXCEL_FILE_SIZE_MB, MAX_CSV_FILE_SIZE_MB,
     get_excel_sheet_names, read_uploaded_file_sheet,
     generate_sql_script, upload_raw_to_batchupdate,
@@ -73,25 +76,45 @@ def upload_view(request):
                 messages.error(request, 'No subscriber assigned. Please contact admin.')
                 return redirect('upload')
             excel_file = request.FILES['excel_file']
+            excel_password = request.POST.get('excel_password', '').strip() or None
 
             # Validate file extension
-            if not excel_file.name.endswith(('.xlsx', '.xls', '.csv')):
-                messages.error(request, 'Please upload an Excel or CSV file (.xlsx, .xls, .csv)')
+            if not excel_file.name.endswith(('.xlsx', '.xls', '.xlsb', '.csv')):
+                messages.error(request, 'Please upload an Excel or CSV file (.xlsx, .xls, .xlsb, .csv)')
                 return redirect('upload')
 
             # P1: Type-aware file size limit
             # Excel: openpyxl loads ~6x the file size into RAM, so a lower cap is enforced.
             # CSV: streamed in chunks, so a higher cap is safe.
             is_csv = excel_file.name.endswith('.csv')
+            is_xlsb = excel_file.name.endswith('.xlsb')
             max_size_mb = MAX_CSV_FILE_SIZE_MB if is_csv else MAX_EXCEL_FILE_SIZE_MB
             if excel_file.size > max_size_mb * 1024 * 1024:
                 messages.error(request, f'File too large. Maximum size is {max_size_mb} MB for {"CSV" if is_csv else "Excel"} files.')
                 return redirect('upload')
-            
+
+            # Password decryption: if a password is supplied, decrypt the stream now
+            # so that the saved file on disk is always an unencrypted, readable workbook.
+            file_to_save = excel_file
+            if excel_password and not is_csv:
+                try:
+                    xl = read_excel_file(excel_file, excel_file.name, password=excel_password)
+                    # Re-export the decrypted workbook to a plain BytesIO so downstream
+                    # file-path readers (openpyxl / xlrd) work without a password.
+                    decrypted_buf = BytesIO()
+                    with pd.ExcelWriter(decrypted_buf, engine='openpyxl') as writer:
+                        for sheet in xl.sheet_names:
+                            xl.parse(sheet, dtype=str).to_excel(writer, sheet_name=sheet, index=False)
+                    decrypted_buf.seek(0)
+                    file_to_save = ContentFile(decrypted_buf.read(), name=excel_file.name)
+                except ValueError as exc:
+                    messages.error(request, str(exc))
+                    return redirect('upload')
+
             # Save the uploaded file temporarily to read sheets
             temp_session = UploadSession.objects.create(
                 user=request.user,
-                original_file=excel_file,
+                original_file=file_to_save,
                 original_filename=excel_file.name,
                 status='pending_mapping',
                 subscriber=subscriber,
@@ -133,7 +156,16 @@ def upload_view(request):
             
             if sheet_names is None or len(sheet_names) <= 1:
                 # Single sheet or CSV — use the temp session directly
-                sheet_name = build_sheet_name(subscriber)
+                name_override = None
+                try:
+                    fname_no_ext = os.path.splitext(excel_file.name)[0]
+                    _, parsed_name = _resolve_subscriber_from_name(fname_no_ext)
+                    if parsed_name and parsed_name != fname_no_ext:
+                        name_override = parsed_name
+                except Exception:
+                    pass
+
+                sheet_name = build_sheet_name(subscriber, name_override=name_override)
                 temp_session.sheet_name = sheet_name
                 temp_session.save()
 
@@ -150,7 +182,7 @@ def upload_view(request):
                     hrow = detect_header_row(file_path, template_signatures=template_signatures)
                     first_session.header_row = hrow
                     first_session.save()
-                    df = read_uploaded_file(file_path, header=hrow)
+                    df = read_uploaded_file(file_path, header=hrow, nrows=0)  # headers only — data loaded in task
                     _try_auto_map(request, first_session, df)
                     if first_session.mappings.exists():
                         return redirect('process', session_id=first_session.id)
@@ -170,51 +202,66 @@ def upload_view(request):
                     MappingTemplate.objects.filter(user=request.user)
                     .values_list('header_signature', flat=True)
                 )
-                for sheet_index, sname in enumerate(sheet_names, start=1):
+                # Rename source file to prevent overwrite during sheet extraction
+                # (build_sheet_name can produce a name matching the original filename).
+                src_read_path = file_path + '.multisheet_src'
+                shutil.copy2(file_path, src_read_path)
+
+                try:
+                    for sheet_index, sname in enumerate(sheet_names, start=1):
+                        try:
+                            hrow = detect_header_row(src_read_path, sheet_name=sname, template_signatures=template_signatures)
+                            df = read_uploaded_file_sheet(src_read_path, sheet_name=sname, header=hrow)
+                        except Exception as e:
+                            messages.warning(request, f'Could not read sheet "{sname}": {e}')
+                            continue
+
+                        sheet_name_override = None
+                        try:
+                            _, parsed_name = _resolve_subscriber_from_name(sname)
+                            if parsed_name and parsed_name != sname:
+                                sheet_name_override = parsed_name
+                        except Exception:
+                            pass
+
+                        sheet_name = build_sheet_name(subscriber, index=sheet_index if sheet_index > 1 else None, name_override=sheet_name_override)
+                        sheet_filename = f"{sheet_name}.xlsx"
+                        sheet_dir = os.path.join('media', 'uploads')
+                        os.makedirs(sheet_dir, exist_ok=True)
+                        sheet_path = os.path.join(sheet_dir, sheet_filename)
+                        df.to_excel(sheet_path, index=False, engine='openpyxl')
+
+                        # df was read with header=hrow, so when saved via to_excel the
+                        # resulting file always has headers at row 0 (pre-header rows are dropped).
+                        session = UploadSession.objects.create(
+                            user=request.user,
+                            original_file=f'uploads/{sheet_filename}',
+                            original_filename=sname,
+                            status='pending_mapping',
+                            sheet_name=sheet_name,
+                            batch_id=batch_id,
+                            source_filename=excel_file.name,
+                            header_row=0,
+                            subscriber=subscriber,
+                        )
+
+                        _process_sheet_upload(session, sheet_path, sheet_name, df=df)
+
+                        try:
+                            _try_auto_map(request, session, df)
+                            if session.mappings.filter(target_column__isnull=False).exclude(target_column='').exists():
+                                session.status = 'processing'
+                                session.save()
+                                async_task('update.tasks.process_file_task', session.id)
+                        except Exception:
+                            logger.warning(f"Auto-map failed for session {session.id}", exc_info=True)
+
+                        created_sessions.append(session)
+                finally:
                     try:
-                        hrow = detect_header_row(file_path, sheet_name=sname, template_signatures=template_signatures)
-                        df = read_uploaded_file_sheet(file_path, sheet_name=sname, header=hrow)
-                    except Exception as e:
-                        messages.warning(request, f'Could not read sheet "{sname}": {e}')
-                        continue
-
-                    sheet_name = build_sheet_name(subscriber, index=sheet_index if sheet_index > 1 else None)
-                    sheet_filename = f"{sheet_name}.xlsx"
-                    sheet_dir = os.path.join('media', 'uploads')
-                    os.makedirs(sheet_dir, exist_ok=True)
-                    sheet_path = os.path.join(sheet_dir, sheet_filename)
-                    df.to_excel(sheet_path, index=False, engine='openpyxl')
-
-                    # df was read with header=hrow, so when saved via to_excel the
-                    # resulting file always has headers at row 0 (pre-header rows are dropped).
-                    session = UploadSession.objects.create(
-                        user=request.user,
-                        original_file=f'uploads/{sheet_filename}',
-                        original_filename=sname,
-                        status='pending_mapping',
-                        sheet_name=sheet_name,
-                        batch_id=batch_id,
-                        source_filename=excel_file.name,
-                        header_row=0,
-                        subscriber=subscriber,
-                    )
-
-                    # Generate SQL script and upload to BatchUpdate
-                    _process_sheet_upload(session, sheet_path, sheet_name, df=df)
-
-                    # Auto-map immediately while df is in scope, then release it.
-                    # Do NOT accumulate (session, df) tuples — each sheet's df can be
-                    # hundreds of MB; holding all sheets simultaneously exhausts RAM.
-                    try:
-                        _try_auto_map(request, session, df)
-                        if session.mappings.filter(target_column__isnull=False).exclude(target_column='').exists():
-                            session.status = 'processing'
-                            session.save()
-                            async_task('update.tasks.process_file_task', session.id)
-                    except Exception:
-                        logger.warning(f"Auto-map failed for session {session.id}", exc_info=True)
-
-                    created_sessions.append(session)  # only the session; df goes out of scope here
+                        os.remove(src_read_path)
+                    except OSError:
+                        pass
 
                 if not created_sessions:
                     messages.error(request, 'No sheets could be read from the file.')
@@ -225,17 +272,33 @@ def upload_view(request):
         else:
             # Free upload mode (admin only) — subscriber resolved from filename/sheet tab name
             excel_files = request.FILES.getlist('excel_file')
+            # Collect per-file passwords: excel_password_0, excel_password_1, …
+            # A single-file free-upload also accepts the plain excel_password name.
+            file_passwords = [
+                (request.POST.get(f'excel_password_{i}', '') or '').strip() or None
+                for i in range(len(excel_files))
+            ]
+            if all(p is None for p in file_passwords):
+                # fallback: single shared field from assigned-subscriber form
+                shared = (request.POST.get('excel_password', '') or '').strip() or None
+                file_passwords = [shared] * len(excel_files)
             template_signatures = list(
                 MappingTemplate.objects.filter(user=request.user)
                 .values_list('header_signature', flat=True)
             )
-            return _handle_free_upload(request, excel_files, template_signatures)
+            return _handle_free_upload(request, excel_files, template_signatures, file_passwords)
     
+    # Aggregate stats from ALL user sessions (not just displayed rows)
+    all_user_sessions = UploadSession.objects.filter(user=request.user)
+    total_count = all_user_sessions.count()
+    uploaded_count = all_user_sessions.filter(status='uploaded').count()
+    processed_count = all_user_sessions.filter(status='processed').count()
+    pending_count = all_user_sessions.filter(status__in=['pending_mapping', 'processing']).count()
+    error_count = all_user_sessions.filter(status='error').count()
+
     # Group batch uploads: show one row per batch_id, individual rows for single uploads.
-    # Cap at 10 entries.
-    _all = UploadSession.objects.filter(
-        user=request.user
-    ).select_related('subscriber').order_by('-uploaded_at')[:60]
+    # Cap at 10 entries for the recent-uploads table.
+    _all = all_user_sessions.select_related('subscriber').order_by('-uploaded_at')[:60]
     seen_batches = set()
     sessions = []
     for s in _all:
@@ -255,6 +318,10 @@ def upload_view(request):
         'subscribers': subscribers,
         'subscriber': subscriber,
         'is_external': _is_external(request.user),
+        'total_count': total_count,
+        'uploaded_count': uploaded_count + processed_count,
+        'pending_count': pending_count,
+        'error_count': error_count,
     })
 
 
@@ -283,21 +350,33 @@ def _resolve_subscriber_from_name(name_str):
     return sub_id_int, sub_name
 
 
-def _handle_free_upload(request, excel_files, template_signatures):
+def _handle_free_upload(request, excel_files, template_signatures, file_passwords=None):
     """
     Free upload mode (toggle OFF, admin only).
-    Multiple files  → multi-excel mode: each filename drives its own subscriber.
-    Single file     → multisheet mode: each sheet tab name drives its own subscriber.
+    Filename-driven mode (multiple files, or single file with matching filename)
+    → subscriber parsed from filename.
+    Multisheet fallback mode (single file with non-matching filename)
+    → subscriber parsed from sheet tab names.
+
+    file_passwords: list of passwords (or None) aligned by index to excel_files.
     """
     batch_id = uuid.uuid4()
     created_sessions = []
-    # Free upload mode only accepts Excel (multi-file) or Excel/CSV (single file)
     max_excel_size = MAX_EXCEL_FILE_SIZE_MB * 1024 * 1024
     max_csv_size = MAX_CSV_FILE_SIZE_MB * 1024 * 1024
 
-    if len(excel_files) > 1:
+    # Unify parsing logic: use filename-driven mode if uploading multiple files OR if a single file matches the filename pattern
+    use_filename_driven = len(excel_files) > 1
+    if len(excel_files) == 1:
+        try:
+            _resolve_subscriber_from_name(os.path.splitext(excel_files[0].name)[0])
+            use_filename_driven = True
+        except ValueError:
+            pass
+
+    if use_filename_driven:
         # ── Multi-Excel mode ──────────────────────────────────────────────────
-        for f in excel_files:
+        for idx, f in enumerate(excel_files):
             sheet_name = os.path.splitext(f.name)[0]
             try:
                 sub_id_int, sub_name = _resolve_subscriber_from_name(sheet_name)
@@ -305,11 +384,12 @@ def _handle_free_upload(request, excel_files, template_signatures):
                 messages.warning(request, f'Skipping "{f.name}": filename does not match expected pattern (subid_ddmmyyyy_name).')
                 continue
 
+            is_xlsb_file = f.name.endswith('.xlsb')
             if f.size > max_excel_size:
                 messages.warning(request, f'Skipping "{f.name}": file too large (max {MAX_EXCEL_FILE_SIZE_MB} MB).')
                 continue
-            if not f.name.endswith(('.xlsx', '.xls')):
-                messages.warning(request, f'Skipping "{f.name}": must be .xlsx or .xls in multi-file mode.')
+            if not f.name.endswith(('.xlsx', '.xls', '.xlsb')):
+                messages.warning(request, f'Skipping "{f.name}": must be .xlsx, .xls, or .xlsb in multi-file mode.')
                 continue
 
             subscriber, _ = Subscriber.objects.get_or_create(
@@ -317,9 +397,25 @@ def _handle_free_upload(request, excel_files, template_signatures):
                 defaults={'subscriber_name': sub_name},
             )
 
+            # Decrypt if a password was supplied for this file
+            password = (file_passwords[idx] if file_passwords and idx < len(file_passwords) else None)
+            file_to_save = f
+            if password:
+                try:
+                    xl = read_excel_file(f, f.name, password=password)
+                    decrypted_buf = BytesIO()
+                    with pd.ExcelWriter(decrypted_buf, engine='openpyxl') as writer:
+                        for sheet in xl.sheet_names:
+                            xl.parse(sheet, dtype=str).to_excel(writer, sheet_name=sheet, index=False)
+                    decrypted_buf.seek(0)
+                    file_to_save = ContentFile(decrypted_buf.read(), name=f.name)
+                except ValueError as exc:
+                    messages.warning(request, f'Skipping "{f.name}": {exc}')
+                    continue
+
             session = UploadSession.objects.create(
                 user=request.user,
-                original_file=f,
+                original_file=file_to_save,
                 original_filename=f.name,
                 status='pending_mapping',
                 sheet_name=sheet_name,
@@ -329,35 +425,127 @@ def _handle_free_upload(request, excel_files, template_signatures):
             )
             file_path = session.original_file.path
 
-            # Duplicate detection
+            # Detect sheets
             try:
-                file_hash = calculate_file_hash(file_path)
-                for existing_session in UploadSession.objects.filter(user=request.user, status='uploaded').exclude(id=session.id).order_by('-uploaded_at')[:5]:
-                    if existing_session.original_file and os.path.exists(existing_session.original_file.path):
-                        if file_hash == calculate_file_hash(existing_session.original_file.path):
-                            messages.warning(request, f'"{f.name}" appears to be a duplicate of "{existing_session.original_filename}". Proceeding anyway.')
-                            break
-            except Exception:
-                logger.warning("Duplicate detection failed", exc_info=True)
+                sheet_names = get_excel_sheet_names(file_path)
+            except Exception as exc:
+                logger.error(f"Could not read sheets from uploaded file: {exc}", exc_info=True)
+                try:
+                    session.original_file.delete(save=False)
+                    session.delete()
+                except Exception:
+                    pass
+                messages.warning(request, f'Could not read the uploaded file "{f.name}". Skipping.')
+                continue
 
-            _process_sheet_upload(session, file_path, sheet_name)
+            if sheet_names is not None and len(sheet_names) > 1:
+                # Multi-sheet Excel in multi-file upload — mirrors single-subscriber
+                # multi-sheet logic: use file-level subscriber + build_sheet_name.
+                session.delete()
 
-            try:
-                hrow = detect_header_row(file_path, template_signatures=template_signatures)
-                session.header_row = hrow
-                session.save()
-                df = read_uploaded_file(file_path, header=hrow)
-                _try_auto_map(request, session, df)
-                if session.mappings.filter(target_column__isnull=False).exclude(target_column='').exists():
-                    session.status = 'processing'
+                # Rename source file to prevent overwrite during sheet extraction
+                # (build_sheet_name can produce a name matching the original filename).
+                src_read_path = file_path + '.multisheet_src'
+                shutil.copy2(file_path, src_read_path)
+
+                try:
+                    for sheet_index, sname in enumerate(sheet_names, start=1):
+                        try:
+                            hrow = detect_header_row(src_read_path, sheet_name=sname, template_signatures=template_signatures)
+                            df = read_uploaded_file_sheet(src_read_path, sheet_name=sname, header=hrow)
+                        except Exception as e:
+                            messages.warning(request, f'Could not read sheet "{sname}" from "{f.name}": {e}')
+                            continue
+
+                        sheet_name_override = None
+                        try:
+                            _, parsed_name = _resolve_subscriber_from_name(sname)
+                            if parsed_name and parsed_name != sname:
+                                sheet_name_override = parsed_name
+                        except Exception:
+                            pass
+
+                        sheet_name = build_sheet_name(subscriber, index=sheet_index if sheet_index > 1 else None, name_override=sheet_name_override)
+                        sheet_filename = f"{sheet_name}.xlsx"
+                        sheet_dir = os.path.join('media', 'uploads')
+                        os.makedirs(sheet_dir, exist_ok=True)
+                        sheet_path = os.path.join(sheet_dir, sheet_filename)
+                        df.to_excel(sheet_path, index=False, engine='openpyxl')
+
+                        sheet_session = UploadSession.objects.create(
+                            user=request.user,
+                            original_file=f'uploads/{sheet_filename}',
+                            original_filename=sname,
+                            status='pending_mapping',
+                            sheet_name=sheet_name,
+                            batch_id=batch_id,
+                            source_filename=f.name,
+                            header_row=0,
+                            subscriber=subscriber,
+                        )
+
+                        _process_sheet_upload(sheet_session, sheet_path, sheet_name, df=df)
+
+                        try:
+                            _try_auto_map(request, sheet_session, df)
+                            if sheet_session.mappings.filter(target_column__isnull=False).exclude(target_column='').exists():
+                                sheet_session.status = 'processing'
+                                sheet_session.save()
+                                async_task('update.tasks.process_file_task', sheet_session.id)
+                        except Exception:
+                            logger.warning(f"Auto-map failed for session {sheet_session.id}", exc_info=True)
+
+                        created_sessions.append(sheet_session)
+                finally:
+                    try:
+                        os.remove(src_read_path)
+                    except OSError:
+                        pass
+
+            else:
+                # Single sheet or CSV — use the created session directly
+                # Duplicate detection
+                try:
+                    file_hash = calculate_file_hash(file_path)
+                    for existing_session in UploadSession.objects.filter(user=request.user, status='uploaded').exclude(id=session.id).order_by('-uploaded_at')[:5]:
+                        if existing_session.original_file and os.path.exists(existing_session.original_file.path):
+                            if file_hash == calculate_file_hash(existing_session.original_file.path):
+                                messages.warning(request, f'"{f.name}" appears to be a duplicate of "{existing_session.original_filename}". Proceeding anyway.')
+                                break
+                except Exception:
+                    logger.warning("Duplicate detection failed", exc_info=True)
+
+                _process_sheet_upload(session, file_path, sheet_name)
+
+                try:
+                    hrow = detect_header_row(file_path, template_signatures=template_signatures)
+                    session.header_row = hrow
                     session.save()
-                    async_task('update.tasks.process_file_task', session.id)
-            except Exception:
-                logger.warning(f"Header detection / auto-map failed for session {session.id}", exc_info=True)
+                    df = read_uploaded_file(file_path, header=hrow, nrows=0)  # headers only — data loaded in task
+                    _try_auto_map(request, session, df)
+                    if session.mappings.filter(target_column__isnull=False).exclude(target_column='').exists():
+                        session.status = 'processing'
+                        session.save()
+                        async_task('update.tasks.process_file_task', session.id)
+                except Exception:
+                    logger.warning(f"Header detection / auto-map failed for session {session.id}", exc_info=True)
+                created_sessions.append(session)
+
+        if not created_sessions:
+            logger.warning(
+                "Free upload: no files processed — filenames failed pattern check",
+                extra={'user': request.user.username},
+            )
             messages.error(request, 'No files could be processed. Check that filenames follow the pattern: subid_ddmmyyyy_name.xlsx')
             return redirect('upload')
 
-        return redirect('batch', batch_id=batch_id)
+        if len(created_sessions) > 1:
+            return redirect('batch', batch_id=batch_id)
+        else:
+            session = created_sessions[0]
+            if session.mappings.filter(target_column__isnull=False).exclude(target_column='').exists():
+                return redirect('process', session_id=session.id)
+            return redirect('mapping', session_id=session.id)
 
     else:
         # ── Single-file multisheet mode ────────────────────────────────────────
@@ -367,14 +555,30 @@ def _handle_free_upload(request, excel_files, template_signatures):
             limit = MAX_CSV_FILE_SIZE_MB if f.name.endswith('.csv') else MAX_EXCEL_FILE_SIZE_MB
             messages.error(request, f'File too large. Maximum size is {limit} MB.')
             return redirect('upload')
-        if not f.name.endswith(('.xlsx', '.xls', '.csv')):
-            messages.error(request, 'Please upload an Excel or CSV file (.xlsx, .xls, .csv).')
+        if not f.name.endswith(('.xlsx', '.xls', '.xlsb', '.csv')):
+            messages.error(request, 'Please upload an Excel or CSV file (.xlsx, .xls, .xlsb, .csv).')
             return redirect('upload')
+
+        # Decrypt if a password was supplied
+        password = (file_passwords[0] if file_passwords else None)
+        file_to_save = f
+        if password and not f.name.endswith('.csv'):
+            try:
+                xl = read_excel_file(f, f.name, password=password)
+                decrypted_buf = BytesIO()
+                with pd.ExcelWriter(decrypted_buf, engine='openpyxl') as writer:
+                    for sheet in xl.sheet_names:
+                        xl.parse(sheet, dtype=str).to_excel(writer, sheet_name=sheet, index=False)
+                decrypted_buf.seek(0)
+                file_to_save = ContentFile(decrypted_buf.read(), name=f.name)
+            except ValueError as exc:
+                messages.error(request, str(exc))
+                return redirect('upload')
 
         # Save temporarily to read sheet names
         temp_session = UploadSession.objects.create(
             user=request.user,
-            original_file=f,
+            original_file=file_to_save,
             original_filename=f.name,
             status='pending_mapping',
         )
@@ -559,6 +763,42 @@ def _try_auto_map(request, session, df):
             )
             return
 
+    # 3. Heuristic dictionary fallback: match column headers against dictionary synonyms
+    mappings_dict = {}
+    for header in df.columns:
+        cleaned_header = str(header).strip().lower()
+        matched_target = None
+        for target_col, synonyms in HEADER_MAPPING_DICTIONARY.items():
+            if cleaned_header in synonyms:
+                matched_target = target_col
+                break
+        if matched_target:
+            mappings_dict[header] = matched_target
+
+    # If we mapped at least one target column, save these mappings and cache the template
+    if mappings_dict:
+        for header, target in mappings_dict.items():
+            ColumnMapping.objects.create(
+                session=session,
+                original_header=header,
+                target_column=target,
+            )
+        
+        # Save as a MappingTemplate so subsequent uploads of this file structure take the fast Stage 1 path
+        name = (
+            f"Auto Dict: {session.subscriber} ({session.original_filename[:25]})"
+            if session.subscriber_id
+            else f"Auto Dict from {session.original_filename[:30]}"
+        )
+        MappingTemplate.objects.update_or_create(
+            user=request.user,
+            header_signature=header_signature,
+            defaults={
+                'name': name,
+                'mappings': mappings_dict,
+            },
+        )
+
 
 @login_required
 def mapping_view(request, session_id):
@@ -573,7 +813,7 @@ def mapping_view(request, session_id):
         return redirect('upload')
     
     existing_mappings = {m.original_header: m.target_column for m in session.mappings.all()}
-    target_columns = ColumnMapping.TARGET_COLUMNS
+    target_columns = TARGET_COLUMN_CHOICES
     
     if request.method == 'POST':
         session.mappings.all().delete()
@@ -674,6 +914,65 @@ def result_view(request, session_id):
     })
 
 
+def _stream_parquet_as_excel(parquet_path, base_name, response):
+    """
+    Read a Parquet file and stream-write it to an Excel workbook in constant_memory mode.
+    The workbook writes directly to the response object.
+    """
+    import pyarrow.parquet as pq
+    import xlsxwriter
+    import pandas as pd
+
+    workbook = xlsxwriter.Workbook(response, {'constant_memory': True})
+    sheet_title = base_name[:31]  # Excel sheet name limit
+    ws = workbook.add_worksheet(sheet_title)
+
+    # Formats must be combined upfront — xlsxwriter applies format at write time
+    header_format = workbook.add_format({'bold': False})
+    # AccountNo: text + left-aligned in one combined format
+    account_format = workbook.add_format({'num_format': '@', 'align': 'left'})
+    text_format = workbook.add_format({'num_format': '@'})
+    numeric_format = workbook.add_format({'num_format': 'General'})
+
+    numeric_names = {'CurrentBalanceAmt', 'AmountOverdue', 'MonthsInArrears'}
+    text_names = {'LoanClassification', 'AccountStatusCode'}
+    account_no_names = {'AccountNo'}
+
+    # Read schema/headers from Parquet metadata
+    pf = pq.ParquetFile(parquet_path)
+    headers = pf.schema_arrow.names
+
+    # Write header row
+    for col_idx, header in enumerate(headers):
+        ws.write(0, col_idx, header, header_format)
+
+    # Write data rows in batches to keep memory flat
+    row_idx = 1
+    for batch in pf.iter_batches(batch_size=5000):
+        df = batch.to_pandas()
+        for row in df.itertuples(index=False):
+            for col_idx, val in enumerate(row):
+                header = headers[col_idx]
+                if pd.isna(val) or val is None:
+                    ws.write_blank(row_idx, col_idx, None)
+                    continue
+
+                if header in account_no_names:
+                    ws.write_string(row_idx, col_idx, str(val), account_format)
+                elif header in text_names:
+                    ws.write_string(row_idx, col_idx, str(val), text_format)
+                elif header in numeric_names:
+                    try:
+                        ws.write_number(row_idx, col_idx, float(val), numeric_format)
+                    except (ValueError, TypeError):
+                        ws.write(row_idx, col_idx, val, numeric_format)
+                else:
+                    ws.write(row_idx, col_idx, val)
+            row_idx += 1
+
+    workbook.close()
+
+
 @login_required
 def download_view(request, session_id):
     """Download processed Excel file — blocked for external users."""
@@ -689,14 +988,18 @@ def download_view(request, session_id):
     file_path = session.processed_file.path
     base_name = session.sheet_name if session.sheet_name else os.path.splitext(session.original_filename)[0]
 
-    fh = open(file_path, 'rb')
-    response = FileResponse(
-        fh,
+    response = HttpResponse(
         content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     )
     response['Content-Disposition'] = f'attachment; filename="cleaned_{base_name}.xlsx"'
-    response['Content-Length'] = os.path.getsize(file_path)
-    return response
+    
+    try:
+        _stream_parquet_as_excel(file_path, base_name, response)
+        return response
+    except Exception as e:
+        logger.error(f"Failed to stream processed Excel for session {session_id}: {e}", exc_info=True)
+        messages.error(request, f"Error generating Excel download: {str(e)}")
+        return redirect('result', session_id=session.id)
 
 
 @login_required
@@ -711,14 +1014,18 @@ def download_rejected_view(request, session_id):
     file_path = session.rejected_file.path
     base_name = session.sheet_name if session.sheet_name else os.path.splitext(session.original_filename)[0]
 
-    fh = open(file_path, 'rb')
-    response = FileResponse(
-        fh,
+    response = HttpResponse(
         content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     )
     response['Content-Disposition'] = f'attachment; filename="rejected_{base_name}.xlsx"'
-    response['Content-Length'] = os.path.getsize(file_path)
-    return response
+    
+    try:
+        _stream_parquet_as_excel(file_path, f"rejected_{base_name}", response)
+        return response
+    except Exception as e:
+        logger.error(f"Failed to stream rejected Excel for session {session_id}: {e}", exc_info=True)
+        messages.error(request, f"Error generating Excel download: {str(e)}")
+        return redirect('result', session_id=session.id)
 
 
 @login_required
@@ -846,10 +1153,10 @@ def batch_progress_view(request, batch_id):
 @login_required
 def download_batch_combined(request, batch_id):
     """Download all cleaned sheets from a batch as a single Excel workbook."""
-    from openpyxl import Workbook
-    from openpyxl.utils.dataframe import dataframe_to_rows
-    from .services import format_excel_sheet, to_excel_safe_sheet_name
-    import io
+    import pyarrow.parquet as pq
+    import xlsxwriter
+    import pandas as pd
+    from .services import to_excel_safe_sheet_name
 
     sessions = UploadSession.objects.filter(
         user=request.user,
@@ -860,12 +1167,27 @@ def download_batch_combined(request, batch_id):
         messages.error(request, 'Batch not found.')
         return redirect('upload')
 
-    wb = Workbook()
-    if wb.active:
-        wb.remove(wb.active)
+    response = HttpResponse(
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+    source_filename = sessions.first().source_filename or str(batch_id)
+    base_name = os.path.splitext(source_filename)[0]
+    response['Content-Disposition'] = f'attachment; filename="cleaned_{base_name}.xlsx"'
+
+    # Initialize the workbook directly on the HTTP response with constant_memory enabled
+    workbook = xlsxwriter.Workbook(response, {'constant_memory': True})
+
+    # Formats must be combined upfront — xlsxwriter applies format at write time
+    header_format = workbook.add_format({'bold': False})
+    account_format = workbook.add_format({'num_format': '@', 'align': 'left'})
+    text_format = workbook.add_format({'num_format': '@'})
+    numeric_format = workbook.add_format({'num_format': 'General'})
+
+    numeric_names = {'CurrentBalanceAmt', 'AmountOverdue', 'MonthsInArrears'}
+    text_names = {'LoanClassification', 'AccountStatusCode'}
+    account_no_names = {'AccountNo'}
 
     sheets_added = 0
-    source_filename = sessions.first().source_filename or str(batch_id)
 
     for session in sessions:
         if not session.processed_file:
@@ -873,43 +1195,53 @@ def download_batch_combined(request, batch_id):
         file_path = session.processed_file.path
         if not os.path.exists(file_path):
             continue
-        try:
-            df = pd.read_excel(file_path, dtype=str, engine='openpyxl')
-        except Exception:
-            continue
-
-        # Restore numeric columns to actual numbers so General-formatted cells
-        # are right-aligned (matching individual download behaviour).
-        # Text columns (AccountNo, LoanClassification, AccountStatusCode) stay as strings.
-        _numeric_cols = [
-            'CurrentBalanceAmt', 'AmountOverdue', 'MonthsInArrears',
-            'overdue_amount', 'months_in_arrears',
-        ]
-        for _col in _numeric_cols:
-            if _col in df.columns:
-                df[_col] = pd.to_numeric(df[_col], errors='coerce')
 
         sheet_title = to_excel_safe_sheet_name(session.sheet_name or session.original_filename)
-        ws = wb.create_sheet(title=sheet_title)
-        for row in dataframe_to_rows(df, index=False, header=True):
-            ws.append(row)
-        format_excel_sheet(ws)
-        sheets_added += 1
+        ws = workbook.add_worksheet(sheet_title)
+        
+        try:
+            pf = pq.ParquetFile(file_path)
+            first_batch = next(pf.iter_batches(batch_size=1))
+            headers = first_batch.schema.names
+            
+            # Write headers
+            for col_idx, header in enumerate(headers):
+                ws.write(0, col_idx, header, header_format)
+
+            # Write rows in batches
+            row_idx = 1
+            for batch in pf.iter_batches(batch_size=5000):
+                df = batch.to_pandas()
+                for row in df.itertuples(index=False):
+                    for col_idx, val in enumerate(row):
+                        header = headers[col_idx]
+                        if pd.isna(val) or val is None:
+                            ws.write_blank(row_idx, col_idx, None)
+                            continue
+
+                        if header in account_no_names:
+                            ws.write_string(row_idx, col_idx, str(val), account_format)
+                        elif header in text_names:
+                            ws.write_string(row_idx, col_idx, str(val), text_format)
+                        elif header in numeric_names:
+                            try:
+                                ws.write_number(row_idx, col_idx, float(val), numeric_format)
+                            except (ValueError, TypeError):
+                                ws.write(row_idx, col_idx, val, numeric_format)
+                        else:
+                            ws.write(row_idx, col_idx, val)
+                    row_idx += 1
+            sheets_added += 1
+        except Exception as e:
+            logger.error(f"Failed to add sheet '{sheet_title}' to combined batch combined download: {e}", exc_info=True)
+            continue
 
     if sheets_added == 0:
+        workbook.close()
         messages.error(request, 'No processed sheets available yet. Complete mapping and processing first.')
         return redirect('batch', batch_id=batch_id)
 
-    base_name = os.path.splitext(source_filename)[0]
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-
-    response = HttpResponse(
-        buffer.read(),
-        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    )
-    response['Content-Disposition'] = f'attachment; filename="cleaned_{base_name}.xlsx"'
+    workbook.close()
     return response
 
 
@@ -976,7 +1308,7 @@ def batch_mapping_view(request, batch_id):
             'already_mapped': False,
         })
 
-    target_columns = ColumnMapping.TARGET_COLUMNS
+    target_columns = TARGET_COLUMN_CHOICES
 
     if request.method == 'POST':
         sessions_to_process = []
