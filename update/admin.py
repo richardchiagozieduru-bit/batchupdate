@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import UploadSession, ColumnMapping, MappingTemplate
+from .models import UploadSession, ColumnMapping, MappingTemplate, DroppedFile
 
 
 @admin.register(UploadSession)
@@ -23,3 +23,13 @@ class MappingTemplateAdmin(admin.ModelAdmin):
     list_display = ['name', 'user', 'use_count', 'created_at']
     list_filter = ['user', 'created_at']
     search_fields = ['name']
+
+
+@admin.register(DroppedFile)
+class DroppedFileAdmin(admin.ModelAdmin):
+    list_display = ['original_filename', 'subscriber', 'user', 'status', 'dropped_at', 'imported_by', 'imported_at']
+    list_filter = ['status', 'subscriber', 'dropped_at', 'imported_at']
+    search_fields = ['original_filename', 'user__username', 'subscriber__subscriber_name', 'notes']
+    readonly_fields = ['dropped_at', 'imported_at']
+    ordering = ['-dropped_at']
+

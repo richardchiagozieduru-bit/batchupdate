@@ -1,6 +1,6 @@
 {% extends 'base.html' %}
 
-{% block title %}Processing - Data Cleaner{% endblock %}
+{% block title %}Processing - Batch Support System{% endblock %}
 
 {% block extra_css %}
 <style>
@@ -28,7 +28,14 @@
     
     .progress-status {
         color: var(--text-muted);
-        margin-bottom: 2rem;
+        margin-bottom: 0.5rem;
+    }
+
+    .progress-detail {
+        color: var(--text-muted);
+        font-size: 0.82rem;
+        margin-bottom: 1.5rem;
+        min-height: 1.2em;
     }
     
     .progress-bar-container {
@@ -52,6 +59,23 @@
         font-size: 1.25rem;
         font-weight: 600;
         color: var(--primary);
+    }
+
+    .progress-phase {
+        display: inline-block;
+        padding: 0.25rem 0.75rem;
+        border-radius: 9999px;
+        font-size: 0.72rem;
+        font-weight: 600;
+        margin-bottom: 1rem;
+    }
+    .phase-clean {
+        background: rgba(59,130,246,0.12);
+        color: #2563eb;
+    }
+    .phase-dbupload {
+        background: rgba(245,158,11,0.12);
+        color: #d97706;
     }
     
     .file-info {
@@ -85,7 +109,9 @@
     <div class="progress-container">
         <div class="progress-icon" id="progressIcon">⏳</div>
         <h2 class="progress-title" id="progressTitle">Processing Your File</h2>
+        <div class="progress-phase phase-clean" id="progressPhase">Phase 1: Cleaning</div>
         <p class="progress-status" id="progressStatus">Starting...</p>
+        <p class="progress-detail" id="progressDetail"></p>
         
         <div class="progress-bar-container">
             <div class="progress-bar" id="progressBar"></div>
@@ -113,12 +139,28 @@
     function updateProgress(data) {
         const percent = data.current || 0;
         const status = data.status || 'Processing...';
+        const detail = data.detail || '';
+        const phase = data.phase || 'clean';
         
         document.getElementById('progressBar').style.width = percent + '%';
         document.getElementById('progressPercent').textContent = percent + '%';
         document.getElementById('progressStatus').textContent = status;
+        document.getElementById('progressDetail').textContent = detail;
+
+        // Update phase badge
+        var phaseBadge = document.getElementById('progressPhase');
+        if (phase === 'dbupload') {
+            phaseBadge.className = 'progress-phase phase-dbupload';
+            phaseBadge.textContent = 'Phase 2: Database Upload';
+            document.getElementById('progressTitle').textContent = 'Uploading to BatchUpdate';
+        } else if (phase === 'done') {
+            phaseBadge.style.display = 'none';
+        } else {
+            phaseBadge.className = 'progress-phase phase-clean';
+            phaseBadge.textContent = 'Phase 1: Cleaning';
+        }
         
-        if (percent >= 100) {
+        if (phase === 'done' || (percent >= 100 && phase !== 'dbupload')) {
             clearInterval(pollInterval);
             
             if (data.error) {
@@ -127,11 +169,13 @@
                 document.getElementById('progressTitle').textContent = 'Processing Failed';
                 document.getElementById('errorMessage').textContent = status;
                 document.getElementById('errorMessage').style.display = 'block';
+                phaseBadge.style.display = 'none';
             } else {
                 document.getElementById('progressIcon').textContent = '✅';
                 document.getElementById('progressIcon').className = 'progress-icon success-icon';
                 document.getElementById('progressTitle').textContent = 'Processing Complete!';
                 document.getElementById('actionButtons').style.display = 'block';
+                phaseBadge.style.display = 'none';
                 
                 // Auto-redirect after 2 seconds
                 setTimeout(() => {
@@ -142,7 +186,7 @@
     }
     
     function pollProgress() {
-        fetch(`/progress/${sessionId}/`)
+        fetch(`{% url 'task_progress' session.id %}`)
             .then(response => response.json())
             .then(data => {
                 updateProgress(data);

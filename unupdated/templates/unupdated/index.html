@@ -1,0 +1,1410 @@
+{% extends "base.html" %}
+{% block title %}Unupdated Records — Batch Support System{% endblock %}
+{% block nav_unupdated %}active{% endblock %}
+{% block topbar_title %}<div class="page-title">Unupdated Records Audit</div>{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* ── Stats Row ─────────────────────────────────── */
+    .stats-row {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 1rem;
+        margin-bottom: 1.5rem;
+    }
+    .stat-card {
+        background: white;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 1.25rem;
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+    }
+    .stat-icon {
+        width: 44px;
+        height: 44px;
+        border-radius: 10px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+    }
+    .stat-icon.blue   { background: #eef2fb; color: var(--primary); }
+    .stat-icon.green  { background: #f0fdf4; color: #16a34a; }
+    .stat-icon.amber  { background: #fff7ed; color: var(--accent); }
+    .stat-icon.purple { background: #faf5ff; color: #9333ea; }
+    .stat-value { font-size: 1.5rem; font-weight: 700; color: var(--text); line-height: 1.2; }
+    .stat-label { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.2rem; }
+
+    /* ── Audit Form Card ───────────────────────────── */
+    .audit-card {
+        background: white;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 1.75rem;
+        margin-bottom: 1.5rem;
+    }
+    .audit-card h2 {
+        font-size: 1.05rem;
+        font-weight: 700;
+        color: var(--text);
+        margin-bottom: 0.35rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .audit-card .subtitle {
+        font-size: 0.85rem;
+        color: var(--text-muted);
+        margin-bottom: 1.5rem;
+    }
+
+    /* Form Controls */
+    .form-group {
+        margin-bottom: 1.5rem;
+    }
+    .form-group label {
+        display: block;
+        font-weight: 600;
+        font-size: 0.88rem;
+        margin-bottom: 0.45rem;
+        color: var(--text);
+    }
+
+    /* Subscriber Search */
+    .subscriber-search-wrap {
+        position: relative;
+    }
+    .search-input {
+        width: 100%;
+        padding: 0.75rem 1rem;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        font-size: 0.95rem;
+        outline: none;
+        transition: border-color 0.2s, box-shadow 0.2s;
+        background: #f8fafc;
+    }
+    .search-input:focus {
+        border-color: var(--primary);
+        background: white;
+        box-shadow: 0 0 0 3px rgba(27, 63, 143, 0.12);
+    }
+    .search-results {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        background: white;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.1);
+        max-height: 240px;
+        overflow-y: auto;
+        z-index: 50;
+        margin-top: 4px;
+        display: none;
+    }
+    .search-item {
+        padding: 0.75rem 1rem;
+        cursor: pointer;
+        font-size: 0.9rem;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1px solid #f1f5f9;
+        transition: background 0.15s;
+    }
+    .search-item:hover {
+        background: #f1f5f9;
+    }
+    .search-item .sub-id {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        background: #e2e8f0;
+        padding: 0.15rem 0.5rem;
+        border-radius: 6px;
+    }
+
+    /* Selected Subscriber Chips */
+    .chips-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-top: 0.75rem;
+        margin-bottom: 0.25rem;
+    }
+    .chips-header span {
+        font-size: 0.8rem;
+        color: var(--text-muted);
+        font-weight: 600;
+    }
+    .btn-clear-all {
+        font-size: 0.78rem;
+        color: #ef4444;
+        background: none;
+        border: none;
+        cursor: pointer;
+        font-weight: 600;
+        padding: 0;
+    }
+    .btn-clear-all:hover {
+        text-decoration: underline;
+    }
+    .selected-subscribers {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        min-height: 38px;
+        padding: 0.5rem;
+        background: #f8fafc;
+        border-radius: 8px;
+        border: 1px dashed var(--border);
+    }
+    .selected-subscribers:empty::before {
+        content: 'No subscribers selected yet. Search above to add subscribers.';
+        color: var(--text-muted);
+        font-size: 0.85rem;
+        padding: 0.25rem 0.5rem;
+        font-style: italic;
+    }
+    .subscriber-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        background: #eef2fb;
+        color: var(--primary);
+        border: 1px solid #c7d4f5;
+        padding: 0.35rem 0.75rem;
+        border-radius: 8px;
+        font-size: 0.85rem;
+        font-weight: 500;
+    }
+    .subscriber-chip .remove-btn {
+        cursor: pointer;
+        font-weight: bold;
+        color: var(--primary);
+        margin-left: 2px;
+        transition: color 0.15s;
+    }
+    .subscriber-chip .remove-btn:hover {
+        color: #ef4444;
+    }
+
+    /* Checkbox & Options Grid */
+    .options-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 1.25rem;
+        margin-bottom: 1.5rem;
+    }
+    .option-card {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1rem 1.25rem;
+        background: #f8fafc;
+    }
+    .checkbox-label {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        cursor: pointer;
+        font-size: 0.92rem;
+        font-weight: 600;
+        color: var(--text);
+    }
+    .checkbox-label input[type="checkbox"] {
+        width: 18px;
+        height: 18px;
+        accent-color: var(--accent);
+        cursor: pointer;
+    }
+    .option-card .desc {
+        font-size: 0.78rem;
+        color: var(--text-muted);
+        margin-top: 0.35rem;
+        margin-left: 1.7rem;
+    }
+
+    /* Date Input */
+    .date-input {
+        width: 100%;
+        max-width: 320px;
+        padding: 0.65rem 0.9rem;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        font-size: 0.95rem;
+        background: #f8fafc;
+        outline: none;
+        transition: border-color 0.2s;
+    }
+    .date-input:focus {
+        border-color: var(--primary);
+        background: white;
+    }
+
+    /* Submit Button */
+    .btn-submit-audit {
+        background: var(--accent);
+        color: white;
+        border: none;
+        padding: 0.75rem 1.75rem;
+        border-radius: 8px;
+        font-size: 0.95rem;
+        font-weight: 600;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.6rem;
+        transition: background 0.15s, box-shadow 0.15s;
+    }
+    .btn-submit-audit:hover {
+        background: #d96810;
+        box-shadow: 0 4px 12px rgba(244, 121, 32, 0.3);
+    }
+
+    /* ── Recent Audits Card ────────────────────────── */
+    .recent-card {
+        background: white;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: hidden;
+    }
+    .recent-card-header {
+        padding: 1.25rem 1.5rem;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+    .recent-card-header h2 {
+        font-size: 1rem;
+        font-weight: 600;
+        color: var(--text);
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .recent-table-wrap {
+        overflow-x: auto;
+    }
+    .recent-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.88rem;
+    }
+    .recent-table th {
+        background: #f8fafc;
+        color: var(--text-muted);
+        font-weight: 600;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        padding: 0.75rem 1.25rem;
+        border-bottom: 1px solid var(--border);
+    }
+    .recent-table td {
+        padding: 0.85rem 1.25rem;
+        border-bottom: 1px solid #f1f5f9;
+        color: var(--text);
+    }
+    .recent-table tr:last-child td {
+        border-bottom: none;
+    }
+    .btn-view-audit {
+        background: #eef2fb;
+        color: var(--primary);
+        padding: 0.35rem 0.75rem;
+        border-radius: 6px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        text-decoration: none;
+        border: 1px solid #c7d4f5;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        transition: background 0.15s;
+    }
+    .btn-view-audit:hover {
+        background: #dbe4f8;
+    }
+    .btn-delete-audit {
+        background: #fef2f2;
+        color: #ef4444;
+        border: 1px solid #fecaca;
+        padding: 0.35rem 0.65rem;
+        border-radius: 6px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        transition: background 0.15s, color 0.15s;
+    }
+    .btn-delete-audit:hover {
+        background: #ef4444;
+        color: white;
+    }
+
+    /* ── Collapsible Ungenerated Subscribers Section ──── */
+    .ungenerated-section-card {
+        background: white;
+        border: 1px solid #dbeafe;
+        border-radius: 12px;
+        margin-bottom: 1.5rem;
+        overflow: hidden;
+        box-shadow: 0 2px 8px rgba(37, 99, 235, 0.05);
+        transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .ungenerated-section-card:hover {
+        border-color: #bfdbfe;
+    }
+    .ungenerated-header {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 1.15rem 1.5rem;
+        background: #f8fafc;
+        border: none;
+        text-align: left;
+        cursor: pointer;
+        transition: background 0.15s;
+        font-family: inherit;
+    }
+    .ungenerated-header:hover {
+        background: #f1f5f9;
+    }
+    .ungenerated-header.expanded {
+        background: #f0f7ff;
+        border-bottom: 1px solid #e2e8f0;
+    }
+    .ungenerated-header .header-left {
+        display: flex;
+        align-items: center;
+        gap: 0.85rem;
+        flex-wrap: wrap;
+    }
+    .expand-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        border-radius: 6px;
+        background: white;
+        border: 1px solid #cbd5e1;
+        color: var(--primary);
+        transition: transform 0.2s ease;
+        flex-shrink: 0;
+    }
+    .ungenerated-header.expanded .expand-icon {
+        transform: rotate(90deg);
+        background: #1b3f8f;
+        color: white;
+        border-color: #1b3f8f;
+    }
+    .header-title {
+        font-size: 1.05rem;
+        font-weight: 700;
+        color: var(--text);
+    }
+    .header-side-note {
+        font-size: 0.82rem;
+        color: #475569;
+        background: #e2e8f0;
+        padding: 0.25rem 0.7rem;
+        border-radius: 6px;
+        font-weight: 500;
+    }
+    .ready-counter-pill {
+        font-size: 0.75rem;
+        font-weight: 700;
+        background: #16a34a;
+        color: white;
+        padding: 0.25rem 0.65rem;
+        border-radius: 20px;
+    }
+
+    /* Drawer Inner */
+    .ungenerated-body {
+        padding: 1.25rem 1.5rem;
+        background: white;
+    }
+    .ungenerated-filter-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1rem;
+        flex-wrap: wrap;
+        padding-bottom: 1rem;
+        border-bottom: 1px solid #f1f5f9;
+        margin-bottom: 1rem;
+    }
+    .filter-controls {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        flex-wrap: wrap;
+    }
+    .filter-item {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .filter-item label {
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: var(--text);
+    }
+    .filter-month-input {
+        padding: 0.45rem 0.75rem;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        font-size: 0.88rem;
+        background: #f8fafc;
+        outline: none;
+    }
+    .filter-checkboxes {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+    }
+    .filter-chk-label {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        font-size: 0.85rem;
+        cursor: pointer;
+        color: var(--text);
+    }
+    .btn-scan-ready {
+        background: #eef2fb;
+        color: var(--primary);
+        border: 1px solid #c7d4f5;
+        padding: 0.45rem 0.9rem;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        transition: background 0.15s;
+    }
+    .btn-scan-ready:hover {
+        background: #dbe4f8;
+    }
+    .cache-sync-indicator {
+        font-size: 0.78rem;
+        color: var(--text-muted);
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        background: #f8fafc;
+        padding: 0.35rem 0.65rem;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+    }
+    .filter-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+    }
+    .btn-generate-all {
+        background: #f47920;
+        color: white;
+        border: none;
+        padding: 0.55rem 1.1rem;
+        border-radius: 6px;
+        font-weight: 600;
+        font-size: 0.85rem;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        transition: background 0.15s, box-shadow 0.15s;
+    }
+    .btn-generate-all:hover {
+        background: #d96810;
+        box-shadow: 0 4px 10px rgba(244, 121, 32, 0.25);
+    }
+    .btn-generate-selected {
+        background: #1b3f8f;
+        color: white;
+        border: none;
+        padding: 0.55rem 1.1rem;
+        border-radius: 6px;
+        font-weight: 600;
+        font-size: 0.85rem;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        transition: background 0.15s, opacity 0.15s;
+    }
+    .btn-generate-selected:hover:not(:disabled) {
+        background: #14306e;
+    }
+    .btn-generate-selected:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+    }
+
+    /* States */
+    .ungenerated-state-box {
+        padding: 2rem 1rem;
+        text-align: center;
+        border-radius: 8px;
+        margin-top: 0.5rem;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 0.75rem;
+        color: var(--text-muted);
+        font-size: 0.9rem;
+    }
+    .ungenerated-spinner {
+        width: 28px;
+        height: 28px;
+        border: 3px solid #e2e8f0;
+        border-top-color: var(--primary);
+        border-radius: 50%;
+        animation: spin 0.75s linear infinite;
+    }
+    @keyframes spin {
+        to { transform: rotate(360deg); }
+    }
+    .ungenerated-state-box.empty {
+        background: #f0fdf4;
+        border: 1px solid #bbf7d0;
+        color: #166534;
+    }
+    .ungenerated-state-box.error {
+        background: #fef2f2;
+        border: 1px solid #fecaca;
+        color: #b91c1c;
+    }
+
+    /* Table */
+    .ungenerated-table-wrap {
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    .ungenerated-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.88rem;
+    }
+    .ungenerated-table th {
+        background: #f8fafc;
+        color: var(--text-muted);
+        font-weight: 600;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        padding: 0.75rem 1rem;
+        border-bottom: 1px solid #e2e8f0;
+    }
+    .ungenerated-table td {
+        padding: 0.75rem 1rem;
+        border-bottom: 1px solid #f1f5f9;
+        color: var(--text);
+        vertical-align: middle;
+    }
+    .ungenerated-table tr:hover {
+        background: #f8fafc;
+    }
+    .ungenerated-table tr:last-child td {
+        border-bottom: none;
+    }
+    .period-badge-green {
+        display: inline-block;
+        background: #ecfdf5;
+        color: #047857;
+        font-size: 0.78rem;
+        font-weight: 600;
+        padding: 0.2rem 0.55rem;
+        border-radius: 4px;
+        border: 1px solid #a7f3d0;
+    }
+    .period-badge-gray {
+        display: inline-block;
+        background: #f1f5f9;
+        color: #94a3b8;
+        font-size: 0.78rem;
+        padding: 0.2rem 0.55rem;
+        border-radius: 4px;
+    }
+    .btn-row-generate {
+        background: white;
+        border: 1px solid #cbd5e1;
+        color: var(--text);
+        padding: 0.25rem 0.65rem;
+        border-radius: 4px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.15s;
+    }
+    .btn-row-generate:hover {
+        background: #1b3f8f;
+        color: white;
+        border-color: #1b3f8f;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Top Stats Strip -->
+<div class="stats-row">
+    <div class="stat-card">
+        <div class="stat-icon blue">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                <line x1="8" y1="21" x2="16" y2="21"></line>
+                <line x1="12" y1="17" x2="12" y2="21"></line>
+            </svg>
+        </div>
+        <div>
+            <div class="stat-value">{{ total_batches }}</div>
+            <div class="stat-label">Total Audits Run</div>
+        </div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-icon green">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                <polyline points="22 4 12 14.01 9 11.01"></polyline>
+            </svg>
+        </div>
+        <div>
+            <div class="stat-value">{{ completed_batches }}</div>
+            <div class="stat-label">Completed Audits</div>
+        </div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-icon amber">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                <circle cx="9" cy="7" r="4"></circle>
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+            </svg>
+        </div>
+        <div>
+            <div class="stat-value">{{ total_subscribers_audited }}</div>
+            <div class="stat-label">Subscribers Audited</div>
+        </div>
+    </div>
+</div>
+
+<!-- Collapsible Section: Check for Ungenerated Subscribers -->
+<div class="ungenerated-section-card" id="ungeneratedSectionCard">
+    <button type="button" class="ungenerated-header" id="ungeneratedToggleBtn" aria-expanded="false" aria-controls="ungeneratedDrawer">
+        <div class="header-left">
+            <span class="expand-icon" id="ungeneratedChevron">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <polyline points="9 18 15 12 9 6"></polyline>
+                </svg>
+            </span>
+            <span class="header-title">Check for Ungenerated Subscribers</span>
+            <span class="header-side-note">Subscribers that their files are loaded but unupdated not ran</span>
+        </div>
+        <div class="header-right">
+            <span class="ready-counter-pill" id="ungeneratedCountBadge" style="display: none;">0 Ready</span>
+        </div>
+    </button>
+
+    <div class="ungenerated-body" id="ungeneratedDrawer" style="display: none;">
+        <!-- Filter Toolbar -->
+        <div class="ungenerated-filter-bar">
+            <div class="filter-controls">
+                <div class="filter-item">
+                    <label for="ungeneratedMonthInput">Target Month:</label>
+                    <input type="month" id="ungeneratedMonthInput" class="filter-month-input" value="{{ default_month }}">
+                </div>
+                <div class="filter-checkboxes">
+                    <label class="filter-chk-label">
+                        <input type="checkbox" id="ungeneratedChkConsumer" checked>
+                        <span>Consumer</span>
+                    </label>
+                    <label class="filter-chk-label">
+                        <input type="checkbox" id="ungeneratedChkCommercial" checked>
+                        <span>Commercial</span>
+                    </label>
+                </div>
+                <button type="button" class="btn-scan-ready" id="btnScanUngenerated" title="Perform a live scan of the Bureau database for newly loaded return files">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                    </svg>
+                    <span>Resync Bureau</span>
+                </button>
+                <span class="cache-sync-indicator" id="cacheSyncIndicator" style="display: none;"></span>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="filter-actions" id="ungeneratedActionsWrap" style="display: none;">
+                <button type="button" class="btn-generate-all" id="btnGenerateAllReady">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                    </svg>
+                    Generate Unupdated for All (<span id="countAllSpan">0</span>)
+                </button>
+                <button type="button" class="btn-generate-selected" id="btnGenerateSelectedReady" disabled>
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="20 6 9 17 4 12"></polyline>
+                    </svg>
+                    Generate Selected (<span id="countSelectedSpan">0</span>)
+                </button>
+            </div>
+        </div>
+
+        <!-- State: Loading Spinner -->
+        <div class="ungenerated-state-box" id="ungeneratedLoadingState" style="display: none;">
+            <div class="ungenerated-spinner"></div>
+            <span>Checking Bureau database for subscribers with loaded files...</span>
+        </div>
+
+        <!-- State: Error -->
+        <div class="ungenerated-state-box error" id="ungeneratedErrorState" style="display: none;">
+            <span id="ungeneratedErrorMessage"></span>
+        </div>
+
+        <!-- State: All Done / Empty -->
+        <div class="ungenerated-state-box empty" id="ungeneratedEmptyState" style="display: none;">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="2">
+                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                <polyline points="22 4 12 14.01 9 11.01"></polyline>
+            </svg>
+            <div>
+                <strong>All caught up!</strong>
+                <div id="ungeneratedEmptyNotice" style="font-size: 0.85rem; margin-top: 0.2rem;">
+                    All subscribers who have loaded files for this month already have their unupdated reports generated.
+                </div>
+            </div>
+        </div>
+
+        <!-- Ready Subscribers Table -->
+        <div class="ungenerated-table-wrap" id="ungeneratedTableWrap" style="display: none;">
+            <table class="ungenerated-table">
+                <thead>
+                    <tr>
+                        <th style="width: 44px; text-align: center;">
+                            <input type="checkbox" id="chkSelectAllReady" title="Select / Deselect All">
+                        </th>
+                        <th>Subscriber Name & ID</th>
+                        <th>Consumer Latest Loaded</th>
+                        <th>Commercial Latest Loaded</th>
+                        <th style="width: 110px; text-align: right;">Action</th>
+                    </tr>
+                </thead>
+                <tbody id="ungeneratedTableBody">
+                    <!-- Injected by JavaScript -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Main Audit Form Card -->
+<div class="audit-card">
+    <h2>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <polyline points="12 6 12 12 16 14"></polyline>
+        </svg>
+        Identify Unupdated (Stale) Accounts
+    </h2>
+    <p class="subtitle">Extract subscriber accounts with active balances or arrears that were omitted from their latest monthly reporting submission.</p>
+
+    <form method="POST" id="unupdatedForm">
+        {% csrf_token %}
+
+        <!-- 1. Subscriber Multi-Select -->
+        <div class="form-group subscriber-search-wrap">
+            <label for="subSearch">1. Select Subscriber(s)</label>
+            <input type="text" id="subSearch" class="search-input" placeholder="Type subscriber name or ID" autocomplete="off">
+            <div id="searchResults" class="search-results"></div>
+
+            <div class="chips-header" id="chipsHeader" style="display: none;">
+                <span>Selected Subscribers (<span id="selectedCount">0</span>)</span>
+                <button type="button" class="btn-clear-all" id="btnClearAll">Clear all</button>
+            </div>
+            <div class="selected-subscribers" id="selectedSubscribersContainer">
+                <!-- Chips dynamically injected here -->
+            </div>
+            <div id="hiddenInputsContainer"></div>
+        </div>
+
+        <!-- 2. Account Types -->
+        <div class="form-group">
+            <label>2. Account Types</label>
+            <div class="options-grid">
+                <div class="option-card">
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="include_consumer" id="chkConsumer" checked>
+                        <span>Consumer Loans</span>
+                    </label>
+                    <p class="desc">Individual borrower facilities (generates Consumer worksheet)</p>
+                </div>
+                <div class="option-card">
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="include_commercial" id="chkCommercial" checked>
+                        <span>Commercial Loans</span>
+                    </label>
+                    <p class="desc">Corporate & business facilities (generates Commercial worksheet)</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 3. Target Reporting Period -->
+        <div class="form-group">
+            <label for="reporting_month">3. Target Reporting Period</label>
+            <input type="month" name="reporting_month" id="reporting_month" class="date-input" value="{{ default_month }}" required>
+        </div>
+
+        <!-- 4. Submit Button -->
+        <div style="margin-top: 1.5rem;">
+            <button type="submit" class="btn-submit-audit" id="btnSubmit">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="7 10 12 15 17 10"></polyline>
+                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+                Generate Unupdated Report
+            </button>
+        </div>
+    </form>
+</div>
+
+<!-- Recent Audits Table Card -->
+{% if recent_batches %}
+<div class="recent-card">
+    <div class="recent-card-header">
+        <h2>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                <polyline points="14 2 14 8 20 8"></polyline>
+                <line x1="16" y1="13" x2="8" y2="13"></line>
+                <line x1="16" y1="17" x2="8" y2="17"></line>
+                <polyline points="10 9 9 9 8 9"></polyline>
+            </svg>
+            Recent Audits
+        </h2>
+        <span style="font-size:0.75rem; color:var(--text-muted);">Last {{ recent_batches|length }} batch{{ recent_batches|length|pluralize:"es" }}</span>
+    </div>
+    
+    <div class="recent-table-wrap">
+        <table class="recent-table">
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Cycle</th>
+                    <th>Subscribers</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                    <th style="text-align: center;">Delete</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for b in recent_batches %}
+                <tr>
+                    <td>{{ b.created_at|date:"M d, Y H:i" }}</td>
+                    <td><strong>{{ b.reporting_month }}</strong></td>
+                    <td>
+                        {{ b.sessions.all|length }} subscriber{{ b.sessions.all|length|pluralize }}
+                    </td>
+                    <td>
+                        <span class="status-badge status-{{ b.status }}">
+                            {{ b.get_status_display }}
+                        </span>
+                    </td>
+                    <td>
+                        <a href="{% url 'unupdated:batch_progress' b.batch_id %}" class="btn-view-audit">
+                            View &rarr;
+                        </a>
+                    </td>
+                    <td style="text-align: center;">
+                        <form method="POST" action="{% url 'unupdated:delete_batch' b.batch_id %}" style="display: inline;" onsubmit="return confirm('Are you sure you want to delete this audit batch?');">
+                            {% csrf_token %}
+                            <button type="submit" class="btn-delete-audit" title="Delete Batch">
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="3 6 5 6 21 6"></polyline>
+                                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                                </svg>
+                                Delete
+                            </button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const subSearch = document.getElementById('subSearch');
+    const searchResults = document.getElementById('searchResults');
+    const chipsContainer = document.getElementById('selectedSubscribersContainer');
+    const chipsHeader = document.getElementById('chipsHeader');
+    const selectedCount = document.getElementById('selectedCount');
+    const btnClearAll = document.getElementById('btnClearAll');
+    const hiddenInputs = document.getElementById('hiddenInputsContainer');
+    const form = document.getElementById('unupdatedForm');
+
+    const selectedSubs = new Map();
+    let debounceTimer = null;
+
+    // Search subscribers
+    subSearch.addEventListener('input', () => {
+        clearTimeout(debounceTimer);
+        const q = subSearch.value.trim();
+        if (q.length < 2) {
+            searchResults.style.display = 'none';
+            searchResults.innerHTML = '';
+            return;
+        }
+
+        debounceTimer = setTimeout(() => {
+            fetch(`{% url 'unupdated:subscriber_search_api' %}?q=${encodeURIComponent(q)}`)
+                .then(res => res.json())
+                .then(data => {
+                    searchResults.innerHTML = '';
+                    if (data.results && data.results.length > 0) {
+                        data.results.forEach(sub => {
+                            const div = document.createElement('div');
+                            div.className = 'search-item';
+                            div.innerHTML = `
+                                <span>${sub.subscriber_name}</span>
+                                <span class="sub-id">ID: ${sub.subscriber_id}</span>
+                            `;
+                            div.addEventListener('click', () => {
+                                addSubscriber(sub.subscriber_id, sub.subscriber_name);
+                                subSearch.value = '';
+                                searchResults.style.display = 'none';
+                            });
+                            searchResults.appendChild(div);
+                        });
+                        searchResults.style.display = 'block';
+                    } else {
+                        searchResults.innerHTML = '<div style="padding:0.75rem 1rem; color:#94a3b8; font-size:0.85rem;">No matching subscribers found</div>';
+                        searchResults.style.display = 'block';
+                    }
+                })
+                .catch(err => console.error("Search error:", err));
+        }, 250);
+    });
+
+    document.addEventListener('click', (e) => {
+        if (!subSearch.contains(e.target) && !searchResults.contains(e.target)) {
+            searchResults.style.display = 'none';
+        }
+    });
+
+    function addSubscriber(id, name) {
+        if (selectedSubs.has(id)) return;
+        selectedSubs.set(id, name);
+        renderSubscribers();
+    }
+
+    function removeSubscriber(id) {
+        selectedSubs.delete(id);
+        renderSubscribers();
+    }
+
+    if (btnClearAll) {
+        btnClearAll.addEventListener('click', () => {
+            selectedSubs.clear();
+            renderSubscribers();
+        });
+    }
+
+    function renderSubscribers() {
+        chipsContainer.innerHTML = '';
+        hiddenInputs.innerHTML = '';
+
+        if (selectedSubs.size > 0) {
+            chipsHeader.style.display = 'flex';
+            selectedCount.textContent = selectedSubs.size;
+        } else {
+            chipsHeader.style.display = 'none';
+        }
+
+        selectedSubs.forEach((name, id) => {
+            // Chip
+            const chip = document.createElement('div');
+            chip.className = 'subscriber-chip';
+            chip.innerHTML = `
+                <span>${name} (${id})</span>
+                <span class="remove-btn" title="Remove">&times;</span>
+            `;
+            chip.querySelector('.remove-btn').addEventListener('click', () => removeSubscriber(id));
+            chipsContainer.appendChild(chip);
+
+            // Hidden inputs
+            const inputId = document.createElement('input');
+            inputId.type = 'hidden';
+            inputId.name = 'subscriber_ids';
+            inputId.value = id;
+            hiddenInputs.appendChild(inputId);
+
+            const inputName = document.createElement('input');
+            inputName.type = 'hidden';
+            inputName.name = 'subscriber_names';
+            inputName.value = name;
+            hiddenInputs.appendChild(inputName);
+        });
+    }
+
+    form.addEventListener('submit', (e) => {
+        if (selectedSubs.size === 0) {
+            e.preventDefault();
+            alert('Please select at least one subscriber.');
+            subSearch.focus();
+            return;
+        }
+
+        const chkConsumer = document.getElementById('chkConsumer');
+        const chkCommercial = document.getElementById('chkCommercial');
+        if (!chkConsumer.checked && !chkCommercial.checked) {
+            e.preventDefault();
+            alert('Please select at least one account type (Consumer or Commercial).');
+            return;
+        }
+    });
+
+    // ── Collapsible Ungenerated Subscribers Drawer ─────────────────────
+    const toggleBtn = document.getElementById('ungeneratedToggleBtn');
+    const drawer = document.getElementById('ungeneratedDrawer');
+    const countBadge = document.getElementById('ungeneratedCountBadge');
+    const monthInput = document.getElementById('ungeneratedMonthInput');
+    const chkConsumerReady = document.getElementById('ungeneratedChkConsumer');
+    const chkCommercialReady = document.getElementById('ungeneratedChkCommercial');
+    const btnScan = document.getElementById('btnScanUngenerated');
+    const cacheSyncIndicator = document.getElementById('cacheSyncIndicator');
+    const actionsWrap = document.getElementById('ungeneratedActionsWrap');
+    const btnGenerateAll = document.getElementById('btnGenerateAllReady');
+    const btnGenerateSelected = document.getElementById('btnGenerateSelectedReady');
+    const countAllSpan = document.getElementById('countAllSpan');
+    const countSelectedSpan = document.getElementById('countSelectedSpan');
+    const loadingState = document.getElementById('ungeneratedLoadingState');
+    const errorState = document.getElementById('ungeneratedErrorState');
+    const errorMsg = document.getElementById('ungeneratedErrorMessage');
+    const emptyState = document.getElementById('ungeneratedEmptyState');
+    const emptyNotice = document.getElementById('ungeneratedEmptyNotice');
+    const tableWrap = document.getElementById('ungeneratedTableWrap');
+    const tableBody = document.getElementById('ungeneratedTableBody');
+    const chkSelectAll = document.getElementById('chkSelectAllReady');
+
+    let currentSubscribers = [];
+    let hasScannedOnce = false;
+
+    if (toggleBtn && drawer) {
+        toggleBtn.addEventListener('click', () => {
+            const isExpanded = toggleBtn.getAttribute('aria-expanded') === 'true';
+            if (isExpanded) {
+                drawer.style.display = 'none';
+                toggleBtn.setAttribute('aria-expanded', 'false');
+                toggleBtn.classList.remove('expanded');
+            } else {
+                drawer.style.display = 'block';
+                toggleBtn.setAttribute('aria-expanded', 'true');
+                toggleBtn.classList.add('expanded');
+                if (!hasScannedOnce) {
+                    scanBureauForUngenerated(false);
+                }
+            }
+        });
+    }
+
+    if (btnScan) {
+        btnScan.addEventListener('click', () => {
+            scanBureauForUngenerated(true);
+        });
+    }
+
+    if (monthInput) {
+        monthInput.addEventListener('change', () => {
+            scanBureauForUngenerated(false);
+        });
+    }
+
+    if (chkConsumerReady) {
+        chkConsumerReady.addEventListener('change', () => {
+            scanBureauForUngenerated(false);
+        });
+    }
+
+    if (chkCommercialReady) {
+        chkCommercialReady.addEventListener('change', () => {
+            scanBureauForUngenerated(false);
+        });
+    }
+
+    function scanBureauForUngenerated(forceRefresh = false) {
+        const monthVal = monthInput.value;
+        const incConsumer = chkConsumerReady.checked;
+        const incCommercial = chkCommercialReady.checked;
+
+        if (!incConsumer && !incCommercial) {
+            alert('Please select at least one account type (Consumer or Commercial) to scan.');
+            return;
+        }
+
+        hasScannedOnce = true;
+        countBadge.textContent = forceRefresh ? 'Resyncing Bureau...' : 'Checking cache...';
+        countBadge.style.background = '#64748b';
+        countBadge.style.display = 'inline-block';
+
+        if (btnScan) {
+            btnScan.disabled = true;
+            if (forceRefresh) {
+                btnScan.innerHTML = '<span class="ungenerated-spinner" style="width:13px;height:13px;border-width:2px;margin:0;display:inline-block;"></span> <span>Resyncing...</span>';
+            }
+        }
+
+        const loadingSpan = loadingState.querySelector('span');
+        if (loadingSpan) {
+            loadingSpan.textContent = forceRefresh
+                ? 'Connecting to Bureau DB and scanning 1,500+ registered subscribers (takes ~1-2 mins)...'
+                : 'Loading ready subscribers from local cache...';
+        }
+
+        loadingState.style.display = 'flex';
+        errorState.style.display = 'none';
+        emptyState.style.display = 'none';
+        tableWrap.style.display = 'none';
+        actionsWrap.style.display = 'none';
+        if (chkSelectAll) chkSelectAll.checked = false;
+
+        const params = new URLSearchParams({
+            month: monthVal,
+            include_consumer: incConsumer,
+            include_commercial: incCommercial,
+        });
+        if (forceRefresh) {
+            params.append('refresh', 'true');
+        }
+
+        fetch(`{% url 'unupdated:check_ungenerated_subscribers_api' %}?${params.toString()}`)
+            .then(res => {
+                if (!res.ok) {
+                    throw new Error(`Server returned error HTTP ${res.status}`);
+                }
+                return res.json();
+            })
+            .then(data => {
+                loadingState.style.display = 'none';
+                currentSubscribers = data.subscribers || [];
+
+                if (data.last_synced && cacheSyncIndicator) {
+                    const icon = data.is_cached
+                        ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>'
+                        : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+                    const label = data.is_cached
+                        ? `Cached at ${data.last_synced} (Daily)`
+                        : `Synced at ${data.last_synced}`;
+                    cacheSyncIndicator.innerHTML = `${icon} <span>${label}</span>`;
+                    cacheSyncIndicator.style.display = 'inline-flex';
+                }
+
+                if (currentSubscribers.length === 0) {
+                    countBadge.textContent = 'All Completed';
+                    countBadge.style.background = '#0284c7';
+                    countBadge.style.display = 'inline-block';
+                    emptyNotice.textContent = `All subscribers who have loaded files for ${data.reporting_month} have already had their unupdated audit generated.`;
+                    emptyState.style.display = 'flex';
+                } else {
+                    countBadge.textContent = `${currentSubscribers.length} Ready`;
+                    countBadge.style.background = '#16a34a';
+                    countBadge.style.display = 'inline-block';
+                    countAllSpan.textContent = currentSubscribers.length;
+                    actionsWrap.style.display = 'flex';
+                    renderUngeneratedTable(currentSubscribers);
+                    tableWrap.style.display = 'block';
+                }
+                updateSelectedCount();
+            })
+            .catch(err => {
+                loadingState.style.display = 'none';
+                countBadge.textContent = 'Check Failed';
+                countBadge.style.background = '#dc2626';
+                countBadge.style.display = 'inline-block';
+                errorMsg.textContent = `Failed to scan bureau database: ${err.message}`;
+                errorState.style.display = 'flex';
+            })
+            .finally(() => {
+                if (btnScan) {
+                    btnScan.disabled = false;
+                    btnScan.innerHTML = `
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                        </svg>
+                        <span>Resync Bureau</span>
+                    `;
+                }
+            });
+    }
+
+    function renderUngeneratedTable(subs) {
+        tableBody.innerHTML = '';
+        subs.forEach(sub => {
+            const tr = document.createElement('tr');
+
+            const consumerBadge = sub.consumer_max
+                ? `<span class="period-badge-green">${sub.consumer_max}</span>`
+                : `<span class="period-badge-gray">None</span>`;
+
+            const commercialBadge = sub.commercial_max
+                ? `<span class="period-badge-green">${sub.commercial_max}</span>`
+                : `<span class="period-badge-gray">None</span>`;
+
+            tr.innerHTML = `
+                <td style="text-align: center;">
+                    <input type="checkbox" class="ready-chk" data-id="${sub.subscriber_id}" data-name="${sub.subscriber_name}">
+                </td>
+                <td>
+                    <strong style="color: var(--text);">${sub.subscriber_name}</strong>
+                    <div style="font-size: 0.76rem; color: var(--text-muted); margin-top: 2px;">Subscriber ID: ${sub.subscriber_id}</div>
+                </td>
+                <td>${consumerBadge}</td>
+                <td>${commercialBadge}</td>
+                <td style="text-align: right;">
+                    <button type="button" class="btn-row-generate" data-id="${sub.subscriber_id}" data-name="${sub.subscriber_name}">
+                        Generate
+                    </button>
+                </td>
+            `;
+
+            tr.querySelector('.ready-chk').addEventListener('change', updateSelectedCount);
+            tr.querySelector('.btn-row-generate').addEventListener('click', (e) => {
+                const sid = e.currentTarget.getAttribute('data-id');
+                const sname = e.currentTarget.getAttribute('data-name');
+                dispatchUngeneratedBatch({
+                    generateAll: false,
+                    subscriberIds: [sid],
+                    subscriberNames: [sname],
+                });
+            });
+
+            tableBody.appendChild(tr);
+        });
+    }
+
+    if (chkSelectAll) {
+        chkSelectAll.addEventListener('change', () => {
+            const checkboxes = tableBody.querySelectorAll('.ready-chk');
+            checkboxes.forEach(chk => {
+                chk.checked = chkSelectAll.checked;
+            });
+            updateSelectedCount();
+        });
+    }
+
+    function updateSelectedCount() {
+        const checked = tableBody.querySelectorAll('.ready-chk:checked');
+        const count = checked.length;
+        countSelectedSpan.textContent = count;
+        btnGenerateSelected.disabled = (count === 0);
+
+        const allCheckboxes = tableBody.querySelectorAll('.ready-chk');
+        if (chkSelectAll && allCheckboxes.length > 0) {
+            chkSelectAll.checked = (checked.length === allCheckboxes.length);
+        }
+    }
+
+    if (btnGenerateAll) {
+        btnGenerateAll.addEventListener('click', () => {
+            if (currentSubscribers.length === 0) return;
+            if (!confirm(`Generate unupdated audit for all ${currentSubscribers.length} ready subscribers?`)) {
+                return;
+            }
+            dispatchUngeneratedBatch({ generateAll: true });
+        });
+    }
+
+    if (btnGenerateSelected) {
+        btnGenerateSelected.addEventListener('click', () => {
+            const checked = tableBody.querySelectorAll('.ready-chk:checked');
+            if (checked.length === 0) {
+                alert('Please select at least one subscriber from the table.');
+                return;
+            }
+            const sids = [];
+            const snames = [];
+            checked.forEach(chk => {
+                sids.push(chk.getAttribute('data-id'));
+                snames.push(chk.getAttribute('data-name'));
+            });
+            dispatchUngeneratedBatch({
+                generateAll: false,
+                subscriberIds: sids,
+                subscriberNames: snames,
+            });
+        });
+    }
+
+    function dispatchUngeneratedBatch({ generateAll, subscriberIds = [], subscriberNames = [] }) {
+        const csrfTokenEl = document.querySelector('[name=csrfmiddlewaretoken]');
+        if (!csrfTokenEl) {
+            alert('Security token (CSRF) not found. Please refresh the page.');
+            return;
+        }
+
+        btnGenerateAll.disabled = true;
+        btnGenerateSelected.disabled = true;
+        const originalAllText = btnGenerateAll.innerHTML;
+        btnGenerateAll.textContent = 'Enqueuing batch...';
+
+        const formData = new FormData();
+        formData.append('csrfmiddlewaretoken', csrfTokenEl.value);
+        formData.append('reporting_month', monthInput.value);
+        formData.append('include_consumer', chkConsumerReady.checked);
+        formData.append('include_commercial', chkCommercialReady.checked);
+
+        if (generateAll) {
+            formData.append('generate_all', 'true');
+        } else {
+            formData.append('generate_all', 'false');
+            subscriberIds.forEach(id => formData.append('subscriber_ids', id));
+            subscriberNames.forEach(name => formData.append('subscriber_names', name));
+        }
+
+        fetch(`{% url 'unupdated:dispatch_ungenerated_batch' %}`, {
+            method: 'POST',
+            body: formData,
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest'
+            }
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.redirect_url) {
+                window.location.href = data.redirect_url;
+            } else if (data.error) {
+                alert(`Failed to start batch: ${data.error}`);
+                btnGenerateAll.disabled = false;
+                btnGenerateSelected.disabled = false;
+                btnGenerateAll.innerHTML = originalAllText;
+            }
+        })
+        .catch(err => {
+            alert(`Error communicating with server: ${err.message}`);
+            btnGenerateAll.disabled = false;
+            btnGenerateSelected.disabled = false;
+            btnGenerateAll.innerHTML = originalAllText;
+        });
+    }
+});
+</script>
+{% endblock %}

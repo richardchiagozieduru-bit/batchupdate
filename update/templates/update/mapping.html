@@ -1,10 +1,90 @@
 {% extends 'base.html' %}
 {% load custom_filters %}
 
-{% block title %}Map Columns - Data Cleaner{% endblock %}
+{% block title %}Map Columns - Batch Support System{% endblock %}
 
 {% block extra_css %}
 <style>
+  /* Modal Overlay styling */
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(4px);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.3s ease, visibility 0.3s ease;
+  }
+
+  .modal-overlay.show {
+    opacity: 1;
+    visibility: visible;
+  }
+
+  .modal-box {
+    background: #fff;
+    border-radius: 12px;
+    padding: 2rem;
+    max-width: 480px;
+    width: 90%;
+    box-shadow: 0 20px 40px rgba(0,0,0,0.15);
+    text-align: center;
+    transform: scale(0.9);
+    transition: transform 0.3s ease;
+  }
+
+  .modal-overlay.show .modal-box {
+    transform: scale(1);
+  }
+
+  .modal-icon {
+    font-size: 3rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .modal-title {
+    font-size: 1.35rem;
+    font-weight: 600;
+    color: #1d2939;
+    margin-bottom: 0.75rem;
+  }
+
+  .modal-text {
+    font-size: 0.95rem;
+    color: #475467;
+    line-height: 1.5;
+    margin-bottom: 1.5rem;
+  }
+
+  .modal-footer {
+    display: flex;
+    justify-content: center;
+  }
+
+  .modal-btn {
+    background: #0d6efd;
+    color: #fff;
+    border: none;
+    padding: 0.6rem 2.5rem;
+    font-size: 0.95rem;
+    font-weight: 500;
+    border-radius: 8px;
+    cursor: pointer;
+    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
+    transition: background-color 0.2s ease;
+  }
+
+  .modal-btn:hover {
+    background: #0b5ed7;
+  }
+
   .mapping-container {
     max-width: 1100px;
     margin: 2rem auto;
@@ -271,8 +351,8 @@
 
     <div class="mapping-header">
       <h2>📋 Map Columns</h2>
-      {% if session.sheet_name %}
-        <p>Mapping sheet: <strong style="color:#1d4ed8;">{{ session.sheet_name }}</strong>
+      {% if session.original_filename %}
+        <p>Mapping sheet: <strong style="color:#1d4ed8;">{{ session.original_filename }}</strong>
         {% if session.source_filename %}<span style="color:#6c757d; font-size:0.9rem;"> — from {{ session.source_filename }}</span>{% endif %}</p>
       {% else %}
         <p>Map your Excel columns to the target fields</p>
@@ -312,7 +392,7 @@
               <select name="mapping_{{ header }}" class="mapping-select" onchange="handleSelectChange(this)">
                 <option value="">— Skip —</option>
                 {% for key, label in target_columns %}
-                  <option value="{{ key }}" {% if existing_mappings|get:header == key %}selected{% endif %}>{{ label }}</option>
+                  <option value="{{ key }}" {% if existing_mappings|get:header == key %}selected{% endif %}>{{ label }}{% if key == 'account_number' %} * (Required){% endif %}</option>
                 {% endfor %}
               </select>
             </div>
@@ -344,6 +424,22 @@
 
   </div>
 </div>
+
+{% if request.GET.needs_mapping %}
+<div class="modal-overlay" id="mappingModal">
+  <div class="modal-box">
+    <div class="modal-icon">⚠️</div>
+    <div class="modal-title">Manual Mapping Required</div>
+    <div class="modal-text">
+      The uploaded file <strong>{{ session.original_filename }}</strong> could not be fully auto-mapped. Please map the column headers manually before processing.
+    </div>
+    <div class="modal-footer">
+      <button class="modal-btn" onclick="closeModal()">OK</button>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 {% endblock %}
 
 {% block extra_js %}
@@ -374,12 +470,43 @@
     });
   }
 
+  function closeModal() {
+    const modal = document.getElementById('mappingModal');
+    if (modal) {
+      modal.classList.remove('show');
+      setTimeout(() => modal.remove(), 300);
+    }
+  }
+
   // Initialize on page load
   document.addEventListener('DOMContentLoaded', function() {
     document.querySelectorAll('.mapping-select').forEach(select => {
       if (select.value) select.classList.add('mapped');
     });
     updateMappedCount();
+    
+    // Trigger modal if present
+    const modal = document.getElementById('mappingModal');
+    if (modal) {
+      setTimeout(() => modal.classList.add('show'), 50);
+    }
+
+    // Form submit validation for Account Number
+    const form = document.querySelector('form');
+    if (form) {
+      form.addEventListener('submit', function(e) {
+        let hasAccountNo = false;
+        document.querySelectorAll('.mapping-select').forEach(function(select) {
+          if (select.value === 'account_number') {
+            hasAccountNo = true;
+          }
+        });
+        if (!hasAccountNo) {
+          e.preventDefault();
+          alert('Account Number is a required field. Please map the column containing Account Numbers before proceeding.');
+        }
+      });
+    }
   });
 </script>
 {% endblock %}

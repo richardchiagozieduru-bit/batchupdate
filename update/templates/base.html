@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}Data Cleaner{% endblock %}</title>
+    <title>{% block title %}Batch Support System{% endblock %}</title>
     <style>
         :root {
             --primary: #1b3f8f;
@@ -211,10 +211,37 @@
             <img src="{% static 'img/logo.png' %}" alt="FirstCentral Credit Bureau">
         </div>
         <div class="sidebar-section">Main</div>
+        {% if user.is_staff %}
         <a class="nav-item {% block nav_upload %}{% endblock %}" href="{% url 'upload' %}">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             Upload
+            {% if pending_drop_count > 0 %}
+            <span class="nav-badge" style="background:#f47920;" title="{{ pending_drop_count }} pending file(s) in drop box">{{ pending_drop_count }}</span>
+            {% endif %}
         </a>
+        {% elif is_internal_dropper %}
+        <a class="nav-item active" href="{% url 'client_drop' %}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/><path d="M12 12v9"/><path d="m16 16-4-4-4 4"/></svg>
+            File Drop Box
+        </a>
+        {% else %}
+        <a class="nav-item {% block nav_upload_ext %}{% endblock %}" href="{% url 'upload' %}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            Upload
+        </a>
+        {% endif %}
+
+        {% if user.is_staff %}
+        <div class="sidebar-section">Extraction & Audit</div>
+        <a class="nav-item {% block nav_extraction %}{% endblock %}" href="{% url 'extraction:general' %}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            General Extraction
+        </a>
+        <a class="nav-item {% block nav_unupdated %}{% endblock %}" href="{% url 'unupdated:index' %}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            Unupdated Records
+        </a>
+        {% endif %}
         <div class="sidebar-footer">
             <div class="avatar">{{ user.username|make_list|first|upper }}</div>
             <div class="user-info">
@@ -233,7 +260,7 @@
         <header class="topbar">
             <div>
                 {% block topbar_breadcrumb %}{% endblock %}
-                {% block topbar_title %}<div class="page-title">Data Cleaner</div>{% endblock %}
+                {% block topbar_title %}<div class="page-title">Batch Support System</div>{% endblock %}
             </div>
             <div class="topbar-right">
                 {% block topbar_actions %}{% endblock %}

@@ -24,6 +24,8 @@ venv/
 media/uploads/
 media/processed/
 media/generated_scripts/
+media/cache/
+media/drop_folder/
 logs/
 *.sqlite3
 db.sqlite3
@@ -33,3 +35,4 @@ db.sqlite3
 .idea/
 *.swp
 *.swo
+.example

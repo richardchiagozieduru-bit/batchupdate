@@ -3,6 +3,9 @@ from . import views
 
 urlpatterns = [
     path('', views.upload_view, name='upload'),
+    path('drop/', views.drop_view, name='client_drop'),
+    path('drop/delete/<int:drop_id>/', views.delete_dropped_file_view, name='delete_dropped_file'),
+    path('api/pending-drops/', views.pending_drops_api, name='pending_drops_api'),
     path('mapping/<int:session_id>/', views.mapping_view, name='mapping'),
     path('process/<int:session_id>/', views.process_view, name='process'),
     path('result/<int:session_id>/', views.result_view, name='result'),
@@ -15,7 +18,13 @@ urlpatterns = [
     path('batch/<uuid:batch_id>/download/', views.download_batch_combined, name='download_batch_combined'),
     path('batch/<uuid:batch_id>/scripts/', views.download_batch_scripts_zip, name='download_batch_scripts_zip'),
     path('batch/<uuid:batch_id>/delete/', views.delete_batch_view, name='delete_batch'),
+    path('upload-to-db/<int:session_id>/', views.upload_to_db_view, name='upload_to_db'),
+    path('batch/<uuid:batch_id>/upload-to-db/', views.upload_batch_to_db_view, name='upload_batch_to_db'),
     path('undo/<int:session_id>/', views.undo_upload_view, name='undo_upload'),
     path('progress/<int:session_id>/', views.task_progress_view, name='task_progress'),
+    path('retry/<int:session_id>/', views.retry_session_view, name='retry_session'),
     path('delete/<int:session_id>/', views.delete_session_view, name='delete_session'),
+    path('clear-errors/', views.clear_all_errors_view, name='clear_all_errors'),
+    path('clear-pending/', views.clear_all_pending_view, name='clear_all_pending'),
+    path('api/session-status/', views.recent_sessions_status_api, name='recent_sessions_status_api'),
 ]

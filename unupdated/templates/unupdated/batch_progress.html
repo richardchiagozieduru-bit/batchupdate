@@ -1,0 +1,488 @@
+{% extends "base.html" %}
+{% block title %}Batch Overview — {{ batch.reporting_month }} Unupdated Audit{% endblock %}
+{% block nav_unupdated %}active{% endblock %}
+
+{% block topbar_breadcrumb %}
+<div class="breadcrumb" style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.82rem; color: var(--text-muted);">
+    <a href="{% url 'unupdated:index' %}" style="color: var(--primary); text-decoration: none;">Unupdated Audits</a>
+    <span class="sep">/</span>
+    <span style="color: var(--text);">Batch {{ batch.batch_id|stringformat:"s"|slice:":8" }}</span>
+</div>
+{% endblock %}
+
+{% block topbar_title %}<div class="page-title">Batch Progress Overview</div>{% endblock %}
+
+{% block topbar_actions %}
+<a href="{% url 'unupdated:index' %}" class="btn btn-outline" style="font-size: 0.8rem; display: inline-flex; align-items: center; gap: 0.35rem;">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+    Back to Audits
+</a>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* ── Batch Banner ───────────────────────────────── */
+    .batch-banner {
+        background: white;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 1.25rem 1.5rem;
+        display: flex;
+        align-items: center;
+        gap: 1.25rem;
+        margin-bottom: 1.25rem;
+    }
+    .batch-banner-icon {
+        width: 46px;
+        height: 46px;
+        background: #eef2fb;
+        border: 1px solid #c7d4f5;
+        border-radius: 10px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--primary);
+        flex-shrink: 0;
+    }
+    .batch-banner-title {
+        font-size: 1.05rem;
+        font-weight: 700;
+        color: var(--text);
+    }
+    .batch-banner-sub {
+        font-size: 0.78rem;
+        color: var(--text-muted);
+        margin-top: 0.2rem;
+    }
+    .batch-banner-sub code {
+        background: #f1f5f9;
+        padding: 0.1rem 0.35rem;
+        border-radius: 4px;
+        color: var(--text);
+    }
+    .batch-banner-right {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+    }
+
+    /* ── Stats Strip ────────────────────────────────── */
+    .stats-strip {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 1rem;
+        margin-bottom: 1.25rem;
+    }
+    .stat-card {
+        background: white;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1rem 1.25rem;
+        text-align: center;
+    }
+    .stat-card .s-value {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: var(--text);
+        line-height: 1.2;
+    }
+    .stat-card .s-label {
+        font-size: 0.72rem;
+        color: var(--text-muted);
+        margin-top: 0.2rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+    }
+
+    /* ── Progress Wrap Card ─────────────────────────── */
+    .progress-wrap {
+        background: white;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.25rem 1.5rem;
+        margin-bottom: 1.5rem;
+    }
+    .progress-bar-wrap {
+        background: #f1f5f9;
+        border-radius: 9999px;
+        height: 10px;
+        overflow: hidden;
+        margin-bottom: 0.75rem;
+    }
+    .progress-bar-fill {
+        background: linear-gradient(90deg, var(--accent, #f47920), #fb923c);
+        height: 100%;
+        width: 0%;
+        transition: width 0.3s ease;
+    }
+    .progress-stats {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.82rem;
+        color: var(--text-muted);
+    }
+    .progress-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-top: 1rem;
+        flex-wrap: wrap;
+    }
+
+    /* Primary Action Buttons */
+    .btn-download-primary {
+        background: var(--primary);
+        color: white;
+        padding: 0.65rem 1.4rem;
+        border-radius: 8px;
+        font-weight: 600;
+        font-size: 0.88rem;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        transition: background 0.15s, transform 0.1s;
+    }
+    .btn-download-primary:hover {
+        background: #142f6d;
+        transform: translateY(-1px);
+    }
+    .btn-cancel-task {
+        background: white;
+        border: 1px solid var(--error, #ef4444);
+        color: var(--error, #ef4444);
+        padding: 0.6rem 1.2rem;
+        border-radius: 8px;
+        font-weight: 600;
+        font-size: 0.85rem;
+        cursor: pointer;
+        transition: background 0.15s, color 0.15s;
+    }
+    .btn-cancel-task:hover {
+        background: var(--error, #ef4444);
+        color: white;
+    }
+
+    /* ── Table Card ─────────────────────────────────── */
+    .recent-card {
+        background: white;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: hidden;
+    }
+    .recent-card-header {
+        padding: 1.25rem 1.5rem;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+    .recent-card-header h2 {
+        font-size: 1rem;
+        font-weight: 600;
+        color: var(--text);
+    }
+    .table-responsive {
+        overflow-x: auto;
+    }
+    .sessions-table {
+        width: 100%;
+        border-collapse: collapse;
+        text-align: left;
+        font-size: 0.88rem;
+    }
+    .sessions-table th {
+        background: #f8fafc;
+        color: var(--text-muted);
+        font-weight: 600;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        padding: 0.75rem 1.25rem;
+        border-bottom: 1px solid var(--border);
+    }
+    .sessions-table td {
+        padding: 0.85rem 1.25rem;
+        border-bottom: 1px solid #f1f5f9;
+        color: var(--text);
+    }
+    .sessions-table tr:last-child td {
+        border-bottom: none;
+    }
+    .btn-download-session {
+        background: #f8fafc;
+        color: var(--text);
+        padding: 0.35rem 0.75rem;
+        border-radius: 6px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        border: 1px solid var(--border);
+        transition: background 0.15s;
+    }
+    .btn-download-session:hover {
+        background: #e2e8f0;
+    }
+
+    /* Pulsing status dot */
+    .status-processing::before {
+        content: '';
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #2563eb;
+        display: inline-block;
+        animation: pulse-dot 1.2s infinite;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Top Batch Header Banner -->
+<div class="batch-banner">
+    <div class="batch-banner-icon">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+            <line x1="16" y1="13" x2="8" y2="13"></line>
+            <line x1="16" y1="17" x2="8" y2="17"></line>
+            <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+    </div>
+    <div>
+        <div class="batch-banner-title">Audit Batch: {{ batch.reporting_month }} Cycle</div>
+        <div class="batch-banner-sub">
+            Batch ID: <code>{{ batch.batch_id }}</code> &bull;
+            Exclude Period: <code>{{ batch.last_period_num }}</code> &bull;
+            Cutoff Date: <code>{{ batch.cutoff_date }}</code>
+        </div>
+    </div>
+    <div class="batch-banner-right">
+        <span class="status-badge status-{{ batch.status }}" id="batchStatusBadge">
+            {{ batch.get_status_display }}
+        </span>
+    </div>
+</div>
+
+<!-- Stats Strip -->
+<div class="stats-strip">
+    <div class="stat-card">
+        <div class="s-value" id="statTotalSubscribers">{{ sessions.count }}</div>
+        <div class="s-label">Total Subscribers</div>
+    </div>
+    <div class="stat-card">
+        <div class="s-value" id="statCompletedSubscribers">0</div>
+        <div class="s-label">Completed</div>
+    </div>
+    <div class="stat-card">
+        <div class="s-value" id="statTotalConsumer">0</div>
+        <div class="s-label">Consumer Stale</div>
+    </div>
+    <div class="stat-card">
+        <div class="s-value" id="statTotalCommercial">0</div>
+        <div class="s-label">Commercial Stale</div>
+    </div>
+    <div class="stat-card">
+        <div class="s-value" id="statProgressPct">0%</div>
+        <div class="s-label">Completion</div>
+    </div>
+</div>
+
+<!-- Progress Bar & Actions Wrap -->
+<div class="progress-wrap">
+    <div class="progress-bar-wrap">
+        <div class="progress-bar-fill" id="progressBarFill" style="width: 0%;"></div>
+    </div>
+    <div class="progress-stats">
+        <span id="progressStatusText">Querying database...</span>
+        <span id="progressPercentText">0%</span>
+    </div>
+
+    <div class="progress-actions">
+        <!-- Smart Primary Download Button -->
+        <div id="primaryDownloadWrap" style="display: none;">
+            <a href="#" class="btn-download-primary" id="btnPrimaryDownload">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="7 10 12 15 17 10"></polyline>
+                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+                <span id="lblPrimaryDownload">Download Report</span>
+            </a>
+        </div>
+
+        {% if batch.status == 'processing' %}
+        <form method="POST" action="{% url 'unupdated:cancel_batch' batch.batch_id %}" id="cancelForm">
+            {% csrf_token %}
+            <button type="submit" class="btn-cancel-task" onclick="return confirm('Are you sure you want to cancel this batch?');">
+                Cancel Batch
+            </button>
+        </form>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Subscribers Session Table Card -->
+<div class="recent-card">
+    <div class="recent-card-header">
+        <h2>Subscribers Audit Breakdown</h2>
+        <span style="font-size:0.75rem; color:var(--text-muted);">{{ sessions.count }} subscriber{{ sessions.count|pluralize }} in batch</span>
+    </div>
+
+    <div class="table-responsive">
+        <table class="sessions-table">
+            <thead>
+                <tr>
+                    <th>Subscriber</th>
+                    <th>Consumer Rows</th>
+                    <th>Commercial Rows</th>
+                    <th>Status</th>
+                    <th>Download</th>
+                </tr>
+            </thead>
+            <tbody id="sessionsTableBody">
+                {% for s in sessions %}
+                <tr id="session-row-{{ s.id }}">
+                    <td>
+                        <strong>{{ s.subscriber_name }}</strong>
+                        <div style="font-size: 0.75rem; color: var(--text-muted);">ID: {{ s.subscriber_id }}</div>
+                    </td>
+                    <td class="col-consumer">{{ s.consumer_rows }}</td>
+                    <td class="col-commercial">{{ s.commercial_rows }}</td>
+                    <td>
+                        <span class="status-badge status-{{ s.status }}">
+                            {{ s.get_status_display }}
+                        </span>
+                        {% if s.error_message %}
+                        <div style="font-size: 0.75rem; color: var(--error); margin-top: 4px;">{{ s.error_message }}</div>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if s.subscriber_file %}
+                        <a href="{% url 'unupdated:download_session' s.id %}" class="btn-download-session">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                <polyline points="7 10 12 15 17 10"></polyline>
+                                <line x1="12" y1="15" x2="12" y2="3"></line>
+                            </svg>
+                            .xlsx
+                        </a>
+                        {% else %}
+                        <span style="color: var(--text-muted); font-size: 0.8rem;">—</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const batchId = "{{ batch.batch_id }}";
+    const statusBadge = document.getElementById('batchStatusBadge');
+    const progressBarFill = document.getElementById('progressBarFill');
+    const progressStatusText = document.getElementById('progressStatusText');
+    const progressPercentText = document.getElementById('progressPercentText');
+    const primaryDownloadWrap = document.getElementById('primaryDownloadWrap');
+    const btnPrimaryDownload = document.getElementById('btnPrimaryDownload');
+    const lblPrimaryDownload = document.getElementById('lblPrimaryDownload');
+    const cancelForm = document.getElementById('cancelForm');
+
+    // Stat strip elements
+    const statCompletedSubscribers = document.getElementById('statCompletedSubscribers');
+    const statTotalConsumer = document.getElementById('statTotalConsumer');
+    const statTotalCommercial = document.getElementById('statTotalCommercial');
+    const statProgressPct = document.getElementById('statProgressPct');
+
+    let pollInterval = null;
+
+    function pollStatus() {
+        fetch(`{% url 'unupdated:batch_status_api' batch.batch_id %}`)
+            .then(res => res.json())
+            .then(data => {
+                // Update batch status
+                statusBadge.className = `status-badge status-${data.status}`;
+                statusBadge.textContent = data.status;
+
+                // Update progress bar
+                progressBarFill.style.width = `${data.progress_percent}%`;
+                progressPercentText.textContent = `${data.progress_percent}%`;
+                progressStatusText.textContent = `Completed ${data.completed_sessions} of ${data.total_sessions} subscribers (${data.total_consumer_rows.toLocaleString()} Consumer, ${data.total_commercial_rows.toLocaleString()} Commercial stale accounts)`;
+
+                // Update stat cards
+                if (statCompletedSubscribers) statCompletedSubscribers.textContent = data.completed_sessions;
+                if (statTotalConsumer) statTotalConsumer.textContent = data.total_consumer_rows.toLocaleString();
+                if (statTotalCommercial) statTotalCommercial.textContent = data.total_commercial_rows.toLocaleString();
+                if (statProgressPct) statProgressPct.textContent = `${data.progress_percent}%`;
+
+                // Update sessions table
+                data.sessions.forEach(s => {
+                    const row = document.getElementById(`session-row-${s.id}`);
+                    if (row) {
+                        const cText = (s.status === 'completed' && s.consumer_rows === 0)
+                            ? '0 <span style="font-size:0.72rem; color:var(--success); font-weight:600;">(Up to date)</span>'
+                            : s.consumer_rows.toLocaleString();
+                        const commText = (s.status === 'completed' && s.commercial_rows === 0)
+                            ? '0 <span style="font-size:0.72rem; color:var(--success); font-weight:600;">(Up to date)</span>'
+                            : s.commercial_rows.toLocaleString();
+
+                        row.querySelector('.col-consumer').innerHTML = cText;
+                        row.querySelector('.col-commercial').innerHTML = commText;
+                        
+                        const statusTd = row.children[3];
+                        statusTd.innerHTML = `
+                            <span class="status-badge status-${s.status}">
+                                ${s.status}
+                            </span>
+                            ${s.error_message ? `<div style="font-size: 0.75rem; color: var(--error); margin-top: 4px;">${s.error_message}</div>` : ''}
+                        `;
+
+                        const actionTd = row.children[4];
+                        if (s.download_url) {
+                            actionTd.innerHTML = `
+                                <a href="${s.download_url}" class="btn-download-session">
+                                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                        <polyline points="7 10 12 15 17 10"></polyline>
+                                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                                    </svg>
+                                    .xlsx
+                                </a>
+                            `;
+                        } else {
+                            actionTd.innerHTML = `<span style="color: var(--text-muted); font-size: 0.8rem;">—</span>`;
+                        }
+                    }
+                });
+
+                // Smart Primary Download Button
+                if (data.master_zip_url) {
+                    primaryDownloadWrap.style.display = 'block';
+                    btnPrimaryDownload.href = data.master_zip_url;
+                    lblPrimaryDownload.textContent = `Download Master ZIP Archive (${data.total_sessions} Subscribers)`;
+                } else if (data.single_file_url) {
+                    primaryDownloadWrap.style.display = 'block';
+                    btnPrimaryDownload.href = data.single_file_url;
+                    lblPrimaryDownload.textContent = 'Download .xlsx Report';
+                }
+
+                // If finished or cancelled, stop polling
+                if (['completed', 'error', 'cancelled'].includes(data.status)) {
+                    if (cancelForm) cancelForm.style.display = 'none';
+                    clearInterval(pollInterval);
+                }
+            })
+            .catch(err => console.error("Poll status error:", err));
+    }
+
+    pollStatus();
+    pollInterval = setInterval(pollStatus, 2000);
+});
+</script>
+{% endblock %}

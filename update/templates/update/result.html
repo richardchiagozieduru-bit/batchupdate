@@ -1,6 +1,6 @@
 {% extends 'base.html' %}
 
-{% block title %}Results - Data Cleaner{% endblock %}
+{% block title %}Results - Batch Support System{% endblock %}
 
 {% block extra_css %}
 <style>
@@ -82,6 +82,7 @@
         gap: 1rem;
         justify-content: center;
         margin-top: 2rem;
+        flex-wrap: wrap;
     }
     
     .error-box {
@@ -96,6 +97,84 @@
     .success-icon { color: var(--success); }
     .warning-icon { color: var(--warning); }
     .error-icon { color: var(--error); }
+
+    /* ── DB Upload Section ────────────────────────── */
+    .db-upload-section {
+        margin-top: 2rem;
+        padding: 1.5rem;
+        background: var(--bg-dark);
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        text-align: center;
+    }
+    .db-upload-section h3 {
+        font-size: 1rem;
+        margin-bottom: 0.75rem;
+        color: var(--text);
+    }
+    .db-upload-section p {
+        font-size: 0.85rem;
+        color: var(--text-muted);
+        margin-bottom: 1rem;
+    }
+    .btn-upload-db {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.7rem 1.5rem;
+        background: linear-gradient(135deg, #1b3f8f, #2b56b8);
+        color: white;
+        border: none;
+        border-radius: 10px;
+        font-size: 0.9rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    .btn-upload-db:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(27,63,143,0.3); }
+    .btn-upload-db:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+    }
+
+    /* ── DB Upload Progress Bar ───────────────────── */
+    .db-progress-wrap {
+        margin-top: 1rem;
+        display: none;
+    }
+    .db-progress-wrap.active {
+        display: block;
+    }
+    .db-progress-label {
+        font-size: 0.8rem;
+        color: var(--text-muted);
+        margin-bottom: 0.4rem;
+        display: flex;
+        justify-content: space-between;
+    }
+    .db-progress-bar-bg {
+        width: 100%;
+        height: 10px;
+        background: var(--bg-main);
+        border-radius: 9999px;
+        overflow: hidden;
+        border: 1px solid var(--border);
+    }
+    .db-progress-bar-fill {
+        height: 100%;
+        border-radius: 9999px;
+        background: linear-gradient(90deg, #1b3f8f, #f47920);
+        transition: width 0.5s ease;
+        width: 0%;
+    }
+    .db-progress-detail {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        margin-top: 0.3rem;
+        text-align: right;
+    }
 </style>
 {% endblock %}
 
@@ -106,10 +185,14 @@
             <div class="icon success-icon">✅</div>
             <h2>Upload Complete!</h2>
             <p>Data cleaned and uploaded to SQL Server</p>
+        {% elif session.status == 'uploading_to_db' %}
+            <div class="icon warning-icon">⏳</div>
+            <h2>Uploading to BatchUpdate...</h2>
+            <p>Data is being pushed to the database</p>
         {% elif session.status == 'processed' %}
-            <div class="icon warning-icon">⚠️</div>
-            <h2>Processed (SQL Upload Pending)</h2>
-            <p>Data cleaned but SQL upload had issues</p>
+            <div class="icon success-icon">✅</div>
+            <h2>Cleaned — Ready for Review</h2>
+            <p>Download and verify the output, then upload to BatchUpdate when ready</p>
         {% else %}
             <div class="icon error-icon">❌</div>
             <h2>Error Occurred</h2>
@@ -142,10 +225,10 @@
             <div class="label">Rows Rejected</div>
         </div>
         {% endif %}
-        {% if session.sheet_name %}
+        {% if session.sheet_name or session.original_filename %}
         <div class="stat-card">
-            <div class="value" style="font-size: 1rem;">{{ session.sheet_name }}</div>
-            <div class="label">Sheet Name</div>
+            <div class="value" style="font-size: 0.95rem; word-break: break-all;">{% if session.sheet_name %}{{ session.sheet_name }}{% else %}{{ session.original_filename }}{% endif %}</div>
+            <div class="label">Sheet / Table Name</div>
         </div>
         {% endif %}
         {% if session.batchupdate_uploaded %}
@@ -166,6 +249,59 @@
             {% endfor %}
         </div>
     </div>
+
+    {# ── Upload to BatchUpdate section ────────────────────── #}
+    {% if session.status == 'processed' and session.upload_to_db and not session.batchupdate_uploaded and not is_external %}
+    <div class="db-upload-section" id="dbUploadSection">
+        <h3>Uploading to BatchUpdate...</h3>
+        <div class="db-progress-wrap active" id="dbProgressWrap">
+            <div class="db-progress-label">
+                <span id="dbProgressStep">Starting upload...</span>
+                <span id="dbProgressPct">0%</span>
+            </div>
+            <div class="db-progress-bar-bg">
+                <div class="db-progress-bar-fill" id="dbProgressFill"></div>
+            </div>
+            <div class="db-progress-detail" id="dbProgressDetail">Queued in background...</div>
+        </div>
+    </div>
+    {% elif session.status == 'processed' and session.processed_file and session.sheet_name and not session.batchupdate_uploaded and not is_external %}
+    <div class="db-upload-section" id="dbUploadSection">
+        <h3>Upload to BatchUpdate</h3>
+        <p>You've reviewed the output. Ready to push the cleaned data to the database?</p>
+        <button class="btn-upload-db" id="btnUploadDb" onclick="triggerDbUpload()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            Confirm & Upload to BatchUpdate
+        </button>
+        <div class="db-progress-wrap" id="dbProgressWrap">
+            <div class="db-progress-label">
+                <span id="dbProgressStep">Starting...</span>
+                <span id="dbProgressPct">0%</span>
+            </div>
+            <div class="db-progress-bar-bg">
+                <div class="db-progress-bar-fill" id="dbProgressFill"></div>
+            </div>
+            <div class="db-progress-detail" id="dbProgressDetail"></div>
+        </div>
+    </div>
+    {% endif %}
+
+    {# ── Upload in progress section (shown when page loaded during uploading_to_db) ────── #}
+    {% if session.status == 'uploading_to_db' and not is_external %}
+    <div class="db-upload-section" id="dbUploadSection">
+        <h3>Uploading to BatchUpdate...</h3>
+        <div class="db-progress-wrap active" id="dbProgressWrap">
+            <div class="db-progress-label">
+                <span id="dbProgressStep">Uploading...</span>
+                <span id="dbProgressPct">0%</span>
+            </div>
+            <div class="db-progress-bar-bg">
+                <div class="db-progress-bar-fill" id="dbProgressFill"></div>
+            </div>
+            <div class="db-progress-detail" id="dbProgressDetail"></div>
+        </div>
+    </div>
+    {% endif %}
     
     <div class="actions">
         <a href="{% url 'upload' %}" class="btn btn-secondary">← Upload Another</a>
@@ -183,4 +319,102 @@
         {% endif %}
     </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+{% if session.status == 'processed' or session.status == 'uploading_to_db' %}
+<script>
+(function() {
+    var sessionId = {{ session.id }};
+    var csrfToken = '{{ csrf_token }}';
+    var pollTimer = null;
+
+    window.triggerDbUpload = function() {
+        var btn = document.getElementById('btnUploadDb');
+        btn.disabled = true;
+        btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 1s linear infinite;"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> Uploading...';
+
+        document.getElementById('dbProgressWrap').classList.add('active');
+
+        fetch('{% url "upload_to_db" session.id %}', {
+            method: 'POST',
+            headers: {
+                'X-CSRFToken': csrfToken,
+                'Content-Type': 'application/json',
+            },
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.ok) {
+                startDbPolling();
+            } else {
+                btn.disabled = false;
+                btn.textContent = 'Retry Upload';
+                alert(data.error || 'Upload failed');
+            }
+        })
+        .catch(function(err) {
+            btn.disabled = false;
+            btn.textContent = 'Retry Upload';
+            alert('Network error: ' + err);
+        });
+    };
+
+    function startDbPolling() {
+        pollTimer = setInterval(pollDbProgress, 2000);
+        pollDbProgress();
+    }
+
+    function pollDbProgress() {
+        fetch('{% url "task_progress" session.id %}')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            // If clean phase is reported or still starting, keep waiting for dbupload phase
+            if (data.phase === 'clean') {
+                return;
+            }
+
+            var pct = data.current || 0;
+            var step = data.status || 'Uploading...';
+            var detail = data.detail || '';
+
+            var fill = document.getElementById('dbProgressFill');
+            if (fill) fill.style.width = pct + '%';
+            var pctEl = document.getElementById('dbProgressPct');
+            if (pctEl) pctEl.textContent = pct + '%';
+            var stepEl = document.getElementById('dbProgressStep');
+            if (stepEl) stepEl.textContent = step;
+            var detailEl = document.getElementById('dbProgressDetail');
+            if (detailEl) detailEl.textContent = detail;
+
+            if (data.phase === 'done' || (data.phase === 'dbupload' && pct >= 100)) {
+                clearInterval(pollTimer);
+                if (data.error) {
+                    if (stepEl) stepEl.textContent = '❌ ' + step;
+                    var btn = document.getElementById('btnUploadDb');
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.textContent = '↻ Retry Upload';
+                    }
+                } else {
+                    // Success — reload page to show updated status
+                    setTimeout(function() {
+                        window.location.reload();
+                    }, 1200);
+                }
+            }
+        })
+        .catch(function() {});
+    }
+
+    // If the page loaded while already uploading or if upload_to_db was queued, start polling immediately
+    {% if session.status == 'uploading_to_db' or session.upload_to_db and not session.batchupdate_uploaded and session.status != 'error' %}
+    startDbPolling();
+    {% endif %}
+})();
+</script>
+<style>
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+{% endif %}
 {% endblock %}

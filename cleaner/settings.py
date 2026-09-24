@@ -37,6 +37,8 @@ INSTALLED_APPS = [
     'django_q',
     'acctmgt',
     'update',
+    'extraction',
+    'unupdated',
 ]
 
 MIDDLEWARE = [
@@ -61,6 +63,7 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
+                'update.context_processors.drop_folder_context',
             ],
         },
     },
@@ -69,15 +72,18 @@ TEMPLATES = [
 WSGI_APPLICATION = 'cleaner.wsgi.application'
 
 
-# Database - MSSQL for everything
+# Database - MSSQL for Django App State & Migrations (Local/Server A)
 DATABASES = {
     'default': {
         'ENGINE': 'mssql',
-        'NAME': os.getenv('BATCHUPDATE_DB', 'BatchUpdate'),
-        'HOST': os.getenv('BATCHUPDATE_SERVER', ''),
+        'NAME': os.getenv('APP_DB_NAME', os.getenv('BATCHUPDATE_DB', os.getenv('BATCHUPDATE_NAME', 'BatchUpdate'))),
+        'HOST': os.getenv('APP_DB_SERVER', os.getenv('APP_DB_HOST', os.getenv('BATCHUPDATE_SERVER', os.getenv('BATCHUPDATE_HOST', '')))),
+        'USER': os.getenv('APP_DB_USER', ''),
+        'PASSWORD': os.getenv('APP_DB_PASSWORD', ''),
+        'PORT': os.getenv('APP_DB_PORT', ''),
         'OPTIONS': {
-            'driver': os.getenv('BATCHUPDATE_DRIVER', 'ODBC Driver 17 for SQL Server'),
-            'trusted_connection': os.getenv('BATCHUPDATE_TRUSTED_CONNECTION', 'yes'),
+            'driver': os.getenv('APP_DB_DRIVER', os.getenv('BATCHUPDATE_DRIVER', 'ODBC Driver 17 for SQL Server')),
+            'trusted_connection': os.getenv('APP_DB_TRUSTED_CONNECTION', 'no' if os.getenv('APP_DB_USER') else 'yes'),
         },
     }
 }
@@ -112,16 +118,28 @@ MEDIA_ROOT = BASE_DIR / 'media'
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# Cache — in-memory per-process (suitable for single-server deployment)
-# Subscriber list is cached for 5 minutes to avoid a SQL Server hit on every page load.
+# Cache — in-memory for default app state, plus a dedicated cross-process file-based
+# cache for async task progress (shared between web server & Q-cluster workers).
+CACHE_DIR = BASE_DIR / 'media' / 'cache'
+os.makedirs(CACHE_DIR, exist_ok=True)
+
 CACHES = {
     'default': {
         'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
         'LOCATION': 'dataclean-cache',
+    },
+    'progress': {
+        'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
+        'LOCATION': str(CACHE_DIR),
+        'TIMEOUT': 3600,
+        'OPTIONS': {
+            'MAX_ENTRIES': 2000,
+        }
     }
 }
 SUBSCRIBER_CACHE_TTL = 300   # seconds
 SESSION_RETENTION_DAYS = 30  # days before uploaded files and sessions are purged
+DROPPED_FILE_RETENTION_DAYS = 2  # days before dropped files in media/drop_folder are cleared
 
 
 # Login settings
@@ -145,9 +163,9 @@ DEFAULT_FROM_EMAIL = 'no-reply@firstcentral.com'
 # Django-Q2 Configuration (uses Django ORM as broker - no Redis needed)
 Q_CLUSTER = {
     'name': 'DataClean',
-    'workers': 2,
-    'timeout': 1800,      # 30 minutes max per task
-    'retry': 2400,        # retry window = timeout + 600s — prevents thrashing if a task fails near timeout
+    'workers': 4,
+    'timeout': 10800,     # 3 hours max per task (prevents killing long extractions with 1M+ rows)
+    'retry': 11400,       # retry window = timeout + 600s — prevents thrashing if a task fails near timeout
     'max_attempts': 1,    # do not automatically retry failed file-processing tasks
     'queue_limit': 50,
     'orm': 'default',     # Uses Django's default database as broker
@@ -189,6 +207,16 @@ LOGGING = {
             'level': 'INFO',
             'propagate': False,
         },
+        'extraction': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'unupdated': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
         'django_q': {
             'handlers': ['console', 'file'],
             'level': 'INFO',
@@ -202,14 +230,34 @@ LOGGING = {
     },
 }
 
-# BatchUpdate SQL Server settings
-BATCHUPDATE_SERVER = os.getenv('BATCHUPDATE_SERVER', '')
-BATCHUPDATE_DB = os.getenv('BATCHUPDATE_DB', 'BatchUpdate')
+# BatchUpdate SQL Server settings (Target Upload DB — Bentley Server)
+BATCHUPDATE_SERVER = os.getenv('BATCHUPDATE_SERVER', os.getenv('BATCHUPDATE_HOST', ''))
+BATCHUPDATE_DB = os.getenv('BATCHUPDATE_DB', os.getenv('BATCHUPDATE_NAME', 'BatchUpdate'))
 BATCHUPDATE_DRIVER = os.getenv('BATCHUPDATE_DRIVER', 'ODBC Driver 17 for SQL Server')
-BATCHUPDATE_TRUSTED_CONNECTION = os.getenv('BATCHUPDATE_TRUSTED_CONNECTION', 'yes')
+BATCHUPDATE_TRUSTED_CONNECTION = os.getenv('BATCHUPDATE_TRUSTED_CONNECTION', 'no')
+BATCHUPDATE_USER = os.getenv('BATCHUPDATE_USER', os.getenv('BUREAU_DB_USERNAME', ''))
+BATCHUPDATE_PASSWORD = os.getenv('BATCHUPDATE_PASSWORD', os.getenv('BUREAU_DB_PASSWORD', ''))
 
 # SQL template settings
 SQL_TEMPLATE_PATH = os.path.join(MEDIA_ROOT, 'sql_template', 'template.sql')
 SQL_TEMPLATE_BASE_NAME = os.getenv('SQL_TEMPLATE_BASE_NAME', '446_13042026_gtb')
 SQL_TEMPLATE_BASE_SUBID = os.getenv('SQL_TEMPLATE_BASE_SUBID', '446')
+
+# Bureau SQL Server connection (read-only extraction — remote server)
+BUREAU_DB_SERVER = os.getenv('BUREAU_DB_SERVER', '')
+BUREAU_DB_NAME = os.getenv('BUREAU_DB_NAME', 'XDSBureauAdmin')
+BUREAU_DB_DRIVER = os.getenv('BUREAU_DB_DRIVER', 'ODBC Driver 17 for SQL Server')
+BUREAU_DB_TRUSTED_CONNECTION = os.getenv('BUREAU_DB_TRUSTED_CONNECTION', 'no')
+BUREAU_DB_USERNAME = os.getenv('BUREAU_DB_USERNAME', '')
+BUREAU_DB_PASSWORD = os.getenv('BUREAU_DB_PASSWORD', '')
+
+# Extraction settings
+EXTRACTION_MAX_ROWS_PER_CSV = 1_000_000
+EXTRACTION_FETCH_BATCH_SIZE = 100_000
+EXTRACTION_PARALLEL_WORKERS = 3
+EXTRACTION_ZIP_RETENTION_DAYS = 7
 GENERATED_SCRIPTS_DIR = os.path.join(MEDIA_ROOT, 'generated_scripts')
+
+# Unupdated settings
+UNUPDATED_RETENTION_DAYS = 7
+

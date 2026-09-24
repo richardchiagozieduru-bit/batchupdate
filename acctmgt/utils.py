@@ -10,7 +10,16 @@ class HttpResponseTooManyRequests(HttpResponse):
 
 def is_external(user):
     """Return True if user belongs to the 'external' group."""
+    if not user or not user.is_authenticated:
+        return False
     return user.groups.filter(name='external').exists()
+
+
+def is_internal_dropper(user):
+    """Return True if user belongs to the 'internal_dropper' group."""
+    if not user or not user.is_authenticated:
+        return False
+    return user.groups.filter(name='internal_dropper').exists()
 
 
 def require_bound(user):

@@ -324,7 +324,7 @@
                 onclick="switchSheet('{{ sheet.session.id }}', this)">
                 <span class="sheet-dot {% if sheet.already_mapped %}dot-done{% elif sheet.error %}dot-error{% elif forloop.first %}dot-active{% else %}dot-pending{% endif %}"></span>
                 <div style="flex:1;min-width:0;">
-                    <div class="sheet-item-name">{{ sheet.session.sheet_name }}</div>
+                    <div class="sheet-item-name">{{ sheet.session.original_filename }}</div>
                     <div class="sheet-mapped-count" id="sheetInfo_{{ sheet.session.id }}">
                         {% if sheet.already_mapped %}{{ sheet.session.get_status_display }}{% elif sheet.error %}Error{% else %}0 of {{ sheet.headers|length }} mapped{% endif %}
                     </div>
@@ -353,7 +353,7 @@
                     <div class="already-done-icon">
                         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
                     </div>
-                    <h3>{{ sheet.session.sheet_name }} &mdash; {{ sheet.session.get_status_display }}</h3>
+                    <h3>{{ sheet.session.original_filename }} &mdash; {{ sheet.session.get_status_display }}</h3>
                     <p>This sheet has already been mapped and processed.</p>
                 </div>
             </div>
@@ -364,7 +364,7 @@
                     <div class="error-panel-icon">
                         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
                     </div>
-                    <h3>Error reading {{ sheet.session.sheet_name }}</h3>
+                    <h3>Error reading {{ sheet.session.original_filename }}</h3>
                     <p>{{ sheet.error }}</p>
                 </div>
             </div>
@@ -374,7 +374,7 @@
                 <div class="mapping-card-header">
                     <div class="mapping-card-title">
                         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="17" y1="10" x2="3" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="17" y1="18" x2="3" y2="18"/></svg>
-                        {{ sheet.session.sheet_name }}
+                        {{ sheet.session.original_filename }}
                         <span class="col-count">({{ sheet.headers|length }} columns)</span>
                     </div>
                     <div class="mapped-counter" id="mappedCount_{{ sheet.session.id }}">0 mapped</div>

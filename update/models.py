@@ -18,6 +18,7 @@ class UploadSession(models.Model):
         ('pending_mapping', 'Pending Mapping'),
         ('processing', 'Processing'),
         ('processed', 'Processed'),
+        ('uploading_to_db', 'Uploading to DB'),
         ('uploaded', 'Uploaded to SQL'),
         ('error', 'Error'),
     ]
@@ -42,6 +43,7 @@ class UploadSession(models.Model):
     subscriber = models.ForeignKey(
         'acctmgt.Subscriber', on_delete=models.SET_NULL, null=True, blank=True, related_name='sessions'
     )
+    upload_to_db = models.BooleanField(default=False)
     
     class Meta:
         ordering = ['-uploaded_at']
@@ -78,3 +80,42 @@ class MappingTemplate(models.Model):
     
     def __str__(self):
         return f"{self.name} ({self.use_count} uses)"
+
+
+class DroppedFile(models.Model):
+    """Represents a file dropped into the flat drop folder by an internal dropper."""
+    STATUS_CHOICES = [
+        ('pending', 'Pending Import'),
+        ('imported', 'Imported'),
+        ('deleted', 'Deleted'),
+    ]
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='dropped_files')
+    subscriber = models.ForeignKey(
+        'acctmgt.Subscriber', on_delete=models.SET_NULL, null=True, blank=True, related_name='dropped_files'
+    )
+    file = models.FileField(upload_to='drop_folder/')
+    original_filename = models.CharField(max_length=255)
+    file_size_bytes = models.BigIntegerField(default=0)
+    notes = models.TextField(blank=True)
+    dropped_at = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    imported_at = models.DateTimeField(null=True, blank=True)
+    imported_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='imported_drops')
+
+    class Meta:
+        ordering = ['-dropped_at']
+
+    def __str__(self):
+        return f"{self.original_filename} ({self.user.username}) - {self.status}"
+
+    @property
+    def formatted_size(self):
+        """Human-readable file size."""
+        bytes_val = self.file_size_bytes or 0
+        if bytes_val >= 1024 * 1024:
+            return f"{bytes_val / (1024 * 1024):.1f} MB"
+        elif bytes_val >= 1024:
+            return f"{bytes_val / 1024:.1f} KB"
+        return f"{bytes_val} B"
+

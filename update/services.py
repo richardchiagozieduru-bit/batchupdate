@@ -124,6 +124,60 @@ def detect_header_row(file_path, sheet_name=None, template_signatures=None, max_
     return best_row
 
 
+def is_sheet_usable(df, template_signatures=None):
+    """
+    Check if a DataFrame/sheet contains usable tabular data and recognizable headers.
+    Returns False if:
+      - df is None or empty
+      - df has 0 rows or 0 columns
+      - df is entirely NaN/null
+      - No column header matches any known target column choices,
+        HEADER_MAPPING_DICTIONARY synonyms, or template signatures.
+    """
+    if df is None or df.empty or len(df.columns) == 0:
+        return False
+
+    # Check if df contains at least one non-null value across all cells
+    if df.dropna(how='all').empty:
+        return False
+
+    from .columns import TARGET_COLUMN_CHOICES, HEADER_MAPPING_DICTIONARY
+
+    # Set of valid target column identifiers
+    target_keys = {k.lower() for k, _ in TARGET_COLUMN_CHOICES}
+    target_labels = {v.lower() for _, v in TARGET_COLUMN_CHOICES}
+
+    # Set of all known synonym headers (lowercase)
+    synonym_set = set()
+    for synonyms in HEADER_MAPPING_DICTIONARY.values():
+        for syn in synonyms:
+            synonym_set.add(str(syn).strip().lower())
+
+    df_headers = [
+        str(c).strip().lower()
+        for c in df.columns
+        if str(c).strip() and str(c).strip().lower() not in ('nan', 'none', 'unnamed') and not str(c).strip().lower().startswith('unnamed:')
+    ]
+
+    if not df_headers:
+        return False
+
+    # 1. Check if any header matches known target keys, labels, or dictionary synonyms
+    for h in df_headers:
+        if h in target_keys or h in target_labels or h in synonym_set:
+            return True
+
+    # 2. Check if headers match any known template signatures
+    if template_signatures:
+        import json as _json
+        sig = _json.dumps(sorted([str(c).strip() for c in df.columns]))
+        if sig in template_signatures:
+            return True
+
+    return False
+
+
+
 def read_excel_file(uploaded_file, filename: str, password: str | None = None) -> pd.ExcelFile:
     """Read an uploaded Excel stream into a pd.ExcelFile, with optional password decryption.
 
@@ -271,7 +325,7 @@ def read_account_column_styled(file_path, sheet_name, header_row, col_name):
     with warnings.catch_warnings():
         warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
         try:
-            wb = load_workbook(file_path, data_only=True)
+            wb = load_workbook(file_path, read_only=True, data_only=True)
         except Exception as exc:
             logger.warning(f"read_account_column_styled: could not open {file_path}: {exc}")
             return None
@@ -280,10 +334,12 @@ def read_account_column_styled(file_path, sheet_name, header_row, col_name):
             header_row_1 = header_row + 1  # openpyxl rows are 1-based
             # Locate the target column by matching the header cell value
             col_idx = None
-            for cell in ws[header_row_1]:
-                if cell.value == col_name:
-                    col_idx = cell.column - 1  # convert to 0-based
-                    break
+            for row in ws.iter_rows(min_row=header_row_1, max_row=header_row_1):
+                for idx, cell in enumerate(row):
+                    if cell.value == col_name:
+                        col_idx = idx
+                        break
+                break
             if col_idx is None:
                 logger.debug(f"read_account_column_styled: '{col_name}' not found in row {header_row_1}")
                 return None
@@ -324,22 +380,23 @@ from .columns import (
 ACCOUNT_STATUS_MAP = {
     'Open': ['001', 'open', '01', '1', 'opened', 'active'],
     'Closed': ['002', 'closed', 'close', '02', '2', 'cloed'],
-    'Writtenoff': ['003', 'written off', 'written0ff', '03', '3', 'writenoff', 'writtenoff', 'writeoff', 'write off', ',write off'],
-    'Performing': ['performing', 'perfroming']
+    'Writtenoff': ['003', 'written off', 'written0ff', '03', '3', 'writenoff', 'writtenoff', 'writeoff', 'write off', ',write off','written-off','write-off'],
 }
 
 LOAN_CLASSIFICATION_MAP = {
     'Performing': ['001', 'performing', '1', '01', 'perform', 'performingloansperformingadvances', 
                    'performing loans', 'performing advances', 'performingloans', 'performingadvances', 'performimg'],
     'Watchlist': ['002', 'watchlist', '02', '2', 'pass and watch', 'passwatch', 'pass watch', 
-                  'paasandwatch', 'pw', 'p&w', 'passandwatch'],
+                  'paasandwatch', 'pw', 'p&w', 'passandwatch', 'past and watch', 'pastand watch', 'pastwatch'],
     'Sub standard': ['003', 'sub standard', 'substandard', '03', '3', 'sub', 'subs', 
-                     'substandardloans', 'substandardadvances', 'subsdtand'],
+                     'substandardloans', 'substandardadvances', 'subsdtand','sub-standard'],
     'Doubtful': ['004', 'doubtful', '04', '4', 'very doubtful', 'verydoubtful', 'doub', 'doubt', 
                  'doubtfulloans', 'doubtfuladvances'],
     'Lost': ['005', 'lost', '05', '5', 'loss', 'l'],
-    'Writtenoff': ['write off', 'written off', 'writeoff']
+    'Writtenoff': ['003', 'written off', 'written0ff', '03', '3', 'writenoff', 'writtenoff', 'writeoff', 'write off', ',write off', 'written-off', 'write-off'],
 }
+VALID_ACCOUNT_STATUSES = frozenset(ACCOUNT_STATUS_MAP.keys())
+VALID_CLASSIFICATIONS = frozenset(LOAN_CLASSIFICATION_MAP.keys())
 
 
 def calculate_file_hash(file_path):
@@ -360,6 +417,8 @@ def normalize_value(value, mapping_dict):
         return None
     
     value_str = str(value).lower().strip()
+    if not value_str:
+        return None
     
     for canonical, variations in mapping_dict.items():
         if value_str in [v.lower() for v in variations]:
@@ -409,7 +468,7 @@ def clean_value(value, column_name):
         # Keep only digits and decimal point
         cleaned = re.sub(r'[^\d.]', '', value_str)
         if not cleaned:
-            return None
+            return 'NaN' if value_str else None
         try:
             float_val = float(cleaned)
             # CurrentBalanceAmt and overdue_amount keep decimal precision
@@ -421,10 +480,10 @@ def clean_value(value, column_name):
 
             # Validate against rules
             valid, validated = validate_numeric(result, column_name)
-            return validated if valid else None
+            return validated if valid else 'NaN'
 
         except (ValueError, InvalidOperation):
-            return None
+            return 'NaN'
     
     elif column_name == 'account_status_code':
         return normalize_value(value, ACCOUNT_STATUS_MAP)
@@ -456,12 +515,36 @@ def clean_dataframe(df, mappings, format_for_display=False):
     
     Returns: (cleaned_df, rejected_df)
     """
-    columns_to_keep = list(mappings.keys())
-    df_subset = df[columns_to_keep].copy()
-    df_subset.rename(columns=mappings, inplace=True)
+    # Build df_subset using case-insensitive & whitespace-tolerant column matching
+    normalized_df_cols = {str(c).strip().lower(): c for c in df.columns}
     
-    # Handle duplicate target columns (e.g. two source cols mapped to same target)
-    # Keep only the first occurrence of each column name
+    subset_data = {}
+    for mapped_header, target_col in mappings.items():
+        if target_col in subset_data:
+            continue  # Already mapped a source column for this target
+            
+        if mapped_header in df.columns:
+            subset_data[target_col] = df[mapped_header]
+        else:
+            norm_header = str(mapped_header).strip().lower()
+            if norm_header in normalized_df_cols:
+                matched_col = normalized_df_cols[norm_header]
+                subset_data[target_col] = df[matched_col]
+            else:
+                # Try HEADER_MAPPING_DICTIONARY synonyms for target_col
+                from .columns import HEADER_MAPPING_DICTIONARY
+                synonyms = HEADER_MAPPING_DICTIONARY.get(target_col, [])
+                found_col = None
+                for c in df.columns:
+                    if str(c).strip().lower() in synonyms:
+                        found_col = c
+                        break
+                if found_col is not None:
+                    subset_data[target_col] = df[found_col]
+
+    df_subset = pd.DataFrame(subset_data, index=df.index)
+    
+    # Handle duplicate target columns
     if df_subset.columns.duplicated().any():
         dupes = df_subset.columns[df_subset.columns.duplicated(keep=False)].unique().tolist()
         logger.warning(f"Duplicate target columns detected and deduplicated: {dupes}")
@@ -527,6 +610,50 @@ def apply_business_rules(df, mapped_columns, all_columns=None):
     if not has_outstanding:
         return df, pd.DataFrame()
 
+    def _is_empty(series):
+        s = series.astype(str).str.strip().str.lower()
+        return series.isna() | (s == '') | (s == 'none') | (s == 'nan')
+
+    # ── Rule: Closed account with blank balance, overdue==0, arrears==0, blank classification ──
+    # If CurrentBalanceAmt is blank, overdue_amount is 0 (or empty), months_in_arrears is 0 (or empty),
+    # status is 'Closed', and loan_classification is blank:
+    # Auto-fill CurrentBalanceAmt = 0 and loan_classification = 'Performing'
+    bal_is_empty = _is_empty(df['CurrentBalanceAmt'])
+    overdue_numeric_init = pd.to_numeric(df['overdue_amount'], errors='coerce')
+    overdue_is_zero_or_empty = _is_empty(df['overdue_amount']) | (overdue_numeric_init == 0)
+    arrears_numeric_init = pd.to_numeric(df['months_in_arrears'], errors='coerce')
+    arrears_is_zero_or_empty = _is_empty(df['months_in_arrears']) | (arrears_numeric_init == 0)
+    status_is_closed = df['account_status_code'].astype(str).str.lower().str.strip() == 'closed'
+    class_is_empty = _is_empty(df['loan_classification'])
+
+    closed_blank_bal_mask = bal_is_empty & overdue_is_zero_or_empty & arrears_is_zero_or_empty & status_is_closed & class_is_empty
+    if closed_blank_bal_mask.any():
+        df.loc[closed_blank_bal_mask, 'CurrentBalanceAmt'] = 0
+        df.loc[closed_blank_bal_mask, 'loan_classification'] = 'Performing'
+        df.loc[closed_blank_bal_mask & _is_empty(df['overdue_amount']), 'overdue_amount'] = 0
+        df.loc[closed_blank_bal_mask & _is_empty(df['months_in_arrears']), 'months_in_arrears'] = 0
+        logger.info(f"Auto-populated CurrentBalanceAmt=0 and loan_classification='Performing' for {closed_blank_bal_mask.sum()} closed rows with zero/blank overdue & arrears")
+
+    # ── Rule: Performing & Closed with empty/zero balance, arrears, and overdue ──
+    lc_is_performing = df['loan_classification'].astype(str).str.lower().str.strip() == 'performing'
+    bal_empty_or_zero = _is_empty(df['CurrentBalanceAmt']) | (pd.to_numeric(df['CurrentBalanceAmt'], errors='coerce') == 0)
+    months_empty_or_zero = _is_empty(df['months_in_arrears']) | (pd.to_numeric(df['months_in_arrears'], errors='coerce') == 0)
+    overdue_empty_or_zero = _is_empty(df['overdue_amount']) | (pd.to_numeric(df['overdue_amount'], errors='coerce') == 0)
+
+    new_rule_mask = (
+        lc_is_performing &
+        status_is_closed &
+        bal_empty_or_zero &
+        months_empty_or_zero &
+        overdue_empty_or_zero
+    )
+    if new_rule_mask.any():
+        for col in ['CurrentBalanceAmt', 'months_in_arrears', 'overdue_amount']:
+            col_empty_mask = new_rule_mask & _is_empty(df[col])
+            if col_empty_mask.any():
+                df.loc[col_empty_mask, col] = 0
+        logger.info(f"Auto-populated empty numeric columns with 0 for {new_rule_mask.sum()} Performing/Closed rows with zero/empty balance/arrears/overdue")
+
     # Convert CurrentBalanceAmt to numeric; non-numeric → NaN
     balance = pd.to_numeric(df['CurrentBalanceAmt'], errors='coerce')
     
@@ -536,11 +663,6 @@ def apply_business_rules(df, mapped_columns, all_columns=None):
     not_numeric = balance.isna() & ~original_empty
     reject_empty = original_empty
     reject_nan = not_numeric
-    
-    # Build helper empty-masks for each field
-    def _is_empty(series):
-        s = series.astype(str).str.strip().str.lower()
-        return series.isna() | (s == '') | (s == 'none') | (s == 'nan')
     
     overdue_empty = _is_empty(df['overdue_amount'])
     days_empty = _is_empty(df['months_in_arrears'])
@@ -562,6 +684,8 @@ def apply_business_rules(df, mapped_columns, all_columns=None):
         status_empty = status_empty & ~closed_mask
         logger.info(f"Auto-corrected {closed_mask.sum()} rows: loan_classification 'Closed'/'Cloed' -> 'Performing'")
 
+    invalid_class_mask = ~classification_empty & ~df['loan_classification'].isin(VALID_CLASSIFICATIONS)
+
     # ── Rule 2a: balance > 0 and months_in_arrears == 0 → auto-fill overdue = 0 ──
     bal_positive = balance > 0
     r2a_mask = bal_positive & (days_numeric == 0) & overdue_empty
@@ -570,49 +694,41 @@ def apply_business_rules(df, mapped_columns, all_columns=None):
         overdue_empty = overdue_empty & ~r2a_mask
         logger.info(f"Auto-filled overdue_amount=0 for {r2a_mask.sum()} rows (balance>0, months_in_arrears=0)")
 
-    # ── Rule 2a-2: balance > 0, overdue == 0, months_in_arrears missing → fill months = 0 ──
-    # (If overdue > 0 and months is missing, the row will be rejected by Rule 2 below)
-    overdue_numeric_r2 = pd.to_numeric(df['overdue_amount'], errors='coerce')
-    r2a2_mask = bal_positive & days_empty & (overdue_numeric_r2 == 0)
-    if r2a2_mask.any():
-        df.loc[r2a2_mask, 'months_in_arrears'] = 0
-        days_empty = days_empty & ~r2a2_mask
-        days_numeric = pd.to_numeric(df['months_in_arrears'], errors='coerce')
-        logger.info(f"Auto-filled months_in_arrears=0 for {r2a2_mask.sum()} rows (balance>0, overdue=0, months missing)")
-
-    # ── Rule 2b: balance > 0, months_in_arrears == 0, overdue == 0 → force Performing + Open ──
-    # Re-read overdue after Rule 2a/2a-2 may have just auto-filled zeros
+    # ── Rule 2b: balance > 0, overdue == 0 → force months_in_arrears = 0, Performing + Open ──
+    # Re-read overdue after Rule 2a may have just auto-filled zeros
     overdue_numeric = pd.to_numeric(df['overdue_amount'], errors='coerce')
-    performing_open_mask = bal_positive & (days_numeric == 0) & (overdue_numeric == 0)
+    performing_open_mask = bal_positive & (overdue_numeric == 0) & (days_numeric == 0) & ~days_empty
     if performing_open_mask.any():
+        df.loc[performing_open_mask, 'months_in_arrears'] = 0
         df.loc[performing_open_mask, 'loan_classification'] = 'Performing'
         df.loc[performing_open_mask, 'account_status_code'] = 'Open'
-        # Update empty masks so rejection check doesn't flag these rows
+        # Update empty & numeric masks so rejection check doesn't flag these rows
+        days_empty = days_empty & ~performing_open_mask
+        days_numeric = pd.to_numeric(df['months_in_arrears'], errors='coerce')
         classification_empty = classification_empty & ~performing_open_mask
         status_empty = status_empty & ~performing_open_mask
         logger.info(
             f"Auto-corrected {performing_open_mask.sum()} rows: "
-            f"balance>0, months_in_arrears=0, overdue=0 → loan_classification=Performing, account_status_code=Open"
-        )
-
-    # ── Rule 2c: months_in_arrears > 0, currentbalance == 0, overdue == 0 → Lost + Closed ──
-    r2c_mask = (days_numeric > 0) & (balance == 0) & (overdue_numeric == 0)
-    if r2c_mask.any():
-        df.loc[r2c_mask, 'loan_classification'] = 'Lost'
-        df.loc[r2c_mask, 'account_status_code'] = 'Closed'
-        classification_empty = classification_empty & ~r2c_mask
-        status_empty = status_empty & ~r2c_mask
-        logger.info(
-            f"Auto-corrected {r2c_mask.sum()} rows: "
-            f"months_in_arrears>0, balance=0, overdue=0 → loan_classification=Lost, account_status_code=Closed"
+            f"balance>0, overdue=0 → months_in_arrears=0, loan_classification=Performing, account_status_code=Open"
         )
 
     # ── Rule 2d: currentbalance > 0, overdue > 0, currentbalance == overdue, months_in_arrears > 0 → Watchlist + Open (with exceptions) ──
     r2d_mask = bal_positive & (overdue_numeric > 0) & (balance == overdue_numeric) & (days_numeric > 0)
     if r2d_mask.any():
         lc_lower = df['loan_classification'].astype(str).str.lower().str.strip()
-        exceptions = {'lost', 'loss', 'performing', 'watchlist', 'subsdtand', 'substandard', 'sub standard', 'doubtful'}
-        to_change_mask = r2d_mask & ~lc_lower.isin(exceptions)
+        status_lower = df['account_status_code'].astype(str).str.lower().str.strip()
+        
+        # Sub-case: Writtenoff + Open -> Lost + Writtenoff
+        written_off_mask = r2d_mask & (lc_lower == 'writtenoff') & (status_lower == 'open')
+        if written_off_mask.any():
+            df.loc[written_off_mask, 'loan_classification'] = 'Lost'
+            df.loc[written_off_mask, 'account_status_code'] = 'Writtenoff'
+            classification_empty = classification_empty & ~written_off_mask
+            status_empty = status_empty & ~written_off_mask
+            logger.info(f"Auto-corrected {written_off_mask.sum()} rows: Writtenoff + Open -> Lost + Writtenoff")
+            
+        exceptions = {'lost', 'loss', 'performing', 'watchlist', 'subsdtand', 'substandard', 'sub standard', 'doubtful', 'writtenoff'}
+        to_change_mask = r2d_mask & ~invalid_class_mask & ~lc_lower.isin(exceptions) & ~written_off_mask
         if to_change_mask.any():
             df.loc[to_change_mask, 'loan_classification'] = 'Watchlist'
             df.loc[to_change_mask, 'account_status_code'] = 'Open'
@@ -629,43 +745,36 @@ def apply_business_rules(df, mapped_columns, all_columns=None):
     missing_class = bal_positive & classification_empty
     reject_bal_positive = missing_overdue | missing_days | missing_class
 
-    # ── Rule 3: balance == 0 → auto-fill missing fields ──
-    bal_zero = balance == 0
-    
-    fill_overdue = bal_zero & overdue_empty
-    fill_days = bal_zero & days_empty
-    fill_class = bal_zero & classification_empty
-    fill_status = bal_zero & status_empty
+    # ── Rule 3 (Updated): balance == 0 and (overdue == 0 or empty) ──
+    # Regardless of what loan_classification, account_status_code, or months_in_arrears originally contain,
+    # if balance == 0 and overdue is 0 or empty, populate:
+    # months_in_arrears = 0, loan_classification = 'Performing', account_status_code = 'Closed', overdue_amount = 0
+    bal_zero = (balance == 0)
+    overdue_numeric_init = pd.to_numeric(df['overdue_amount'], errors='coerce')
+    r3_zero_bal_mask = bal_zero & (overdue_empty | (overdue_numeric_init == 0))
 
-    # Rule 3b: balance=0 and months=0 given → ensure overdue=0
-    fill_overdue_3b = bal_zero & (days_numeric == 0) & overdue_empty
-    fill_overdue = fill_overdue | fill_overdue_3b
+    if r3_zero_bal_mask.any():
+        df.loc[r3_zero_bal_mask, 'overdue_amount'] = 0
+        df.loc[r3_zero_bal_mask, 'months_in_arrears'] = 0
+        df.loc[r3_zero_bal_mask, 'loan_classification'] = 'Performing'
+        df.loc[r3_zero_bal_mask, 'account_status_code'] = 'Closed'
 
-    if fill_overdue.any():
-        df.loc[fill_overdue, 'overdue_amount'] = 0
-        logger.info(f"Auto-filled overdue_amount=0 for {fill_overdue.sum()} rows (balance=0)")
-    if fill_days.any():
-        df.loc[fill_days, 'months_in_arrears'] = 0
-        logger.info(f"Auto-filled months_in_arrears=0 for {fill_days.sum()} rows (balance=0)")
-    if fill_class.any():
-        df.loc[fill_class, 'loan_classification'] = 'Performing'
-        logger.info(f"Auto-filled loan_classification=Performing for {fill_class.sum()} rows (balance=0)")
-    if fill_status.any():
-        df.loc[fill_status, 'account_status_code'] = 'Closed'
-        logger.info(f"Auto-filled account_status_code=Closed for {fill_status.sum()} rows (balance=0)")
+        # Update empty masks for these zero-balance rows
+        overdue_empty = overdue_empty & ~r3_zero_bal_mask
+        days_empty = days_empty & ~r3_zero_bal_mask
+        classification_empty = classification_empty & ~r3_zero_bal_mask
+        status_empty = status_empty & ~r3_zero_bal_mask
+        days_numeric = pd.to_numeric(df['months_in_arrears'], errors='coerce')
 
-    # ── Rule 3c: balance=0, overdue=0, months_in_arrears > 0 → correct months to 0 ──
-    overdue_after3 = pd.to_numeric(df['overdue_amount'], errors='coerce')
-    days_after3 = pd.to_numeric(df['months_in_arrears'], errors='coerce')
-    r3c_mask = bal_zero & (overdue_after3 == 0) & (days_after3 > 0)
-    if r3c_mask.any():
-        df.loc[r3c_mask, 'months_in_arrears'] = 0
-        logger.info(f"Auto-corrected months_in_arrears to 0 for {r3c_mask.sum()} rows (balance=0, overdue=0, months>0)")
+        logger.info(
+            f"Auto-populated {r3_zero_bal_mask.sum()} rows (balance=0, overdue=0/empty) → "
+            f"months_in_arrears=0, loan_classification='Performing', account_status_code='Closed', overdue_amount=0"
+        )
 
-    # ── Rule 4: balance is zero or missing but overdue_amount > 0 → reject ──
-    # Re-read overdue after all auto-fills so Rule 3 zeros are accounted for
-    overdue_final = pd.to_numeric(df['overdue_amount'], errors='coerce')
-    reject_zero_bal_with_overdue = (bal_zero | original_empty | balance.isna()) & (overdue_final > 0)
+    # ── Rule 4: balance is zero or missing but overdue_amount > 0 → leave as-is (do not reject) ──
+    # Note: If CurrentBalanceAmt is empty/missing, it is caught separately by reject_empty.
+    # When CurrentBalanceAmt == 0 and overdue_amount > 0, the record is accepted and left as-is.
+    reject_zero_bal_with_overdue = pd.Series(False, index=df.index)
 
     # ── Rule 5: account_number is missing → reject ──
     reject_missing_acct = account_empty
@@ -682,22 +791,20 @@ def apply_business_rules(df, mapped_columns, all_columns=None):
         days_empty_final
     )
 
-    # Rule 7: overdue > balance (strictly greater, not equal) → reject
-    # reject_overdue_exceeds_balance = (
-    #     balance.notna() & overdue_final_pre.notna() &
-    #     (overdue_final_pre > balance) &
-    #     (overdue_final_pre != balance)
-    # )
-    reject_overdue_exceeds_balance = pd.Series(False, index=df.index)  # temporarily disabled
+    # Rule 7: overdue > balance → leave as-is (do not reject)
+    reject_overdue_exceeds_balance = pd.Series(False, index=df.index)
+
+    # ── Post-rules dictionary and status validation ──
+    reject_invalid_class = ~_is_empty(df['loan_classification']) & ~df['loan_classification'].isin(VALID_CLASSIFICATIONS)
+    reject_invalid_status = ~_is_empty(df['account_status_code']) & ~df['account_status_code'].isin(VALID_ACCOUNT_STATUSES)
+    reject_empty_status = _is_empty(df['account_status_code'])
 
     # ── Build rejection reasons ──
     reasons = pd.Series('', index=df.index)
     reasons = reasons.where(~reject_empty, 'Current Balance Amount is empty')
     reasons = reasons.where(~reject_nan, 'Current Balance Amount is not a valid number')
-    reasons = reasons.where(~reject_zero_bal_with_overdue, 'AmountOverdue > 0 but CurrentBalanceAmt is zero or missing')
     reasons = reasons.where(~reject_missing_acct, 'AccountNo is missing')
     reasons = reasons.where(~reject_equal_no_months, 'AmountOverdue equals CurrentBalanceAmt but MonthsInArrears is missing')
-    # reasons = reasons.where(~reject_overdue_exceeds_balance, 'AmountOverdue exceeds CurrentBalanceAmt')  # Rule 7 temporarily disabled
     
     # Build "missing: x, y, z" reasons for balance > 0 rejections
     reject_bal_only = reject_bal_positive & ~reject_empty & ~reject_nan
@@ -720,10 +827,32 @@ def apply_business_rules(df, mapped_columns, all_columns=None):
                 ).where(reasons != '', 'Current Balance > 0 but missing: ' + field)
             )
 
+    # Invalid classification
+    mask_inv_class = reject_invalid_class & (reasons == '')
+    if mask_inv_class.any():
+        reasons = reasons.where(
+            ~mask_inv_class,
+            "Invalid LoanClassification: '" + df['loan_classification'].astype(str) + "' does not match recognized classifications"
+        )
+
+    # Invalid status code
+    mask_inv_status = reject_invalid_status & (reasons == '')
+    if mask_inv_status.any():
+        reasons = reasons.where(
+            ~mask_inv_status,
+            "Invalid AccountStatusCode: '" + df['account_status_code'].astype(str) + "' does not match recognized account statuses"
+        )
+
+    # Empty status code after all rules have executed
+    mask_empty_status = reject_empty_status & (reasons == '')
+    if mask_empty_status.any():
+        reasons = reasons.where(~mask_empty_status, 'AccountStatusCode is empty')
+
     # ── Split valid / rejected ──
     all_reject = (
-        reject_empty | reject_nan | reject_bal_positive | reject_zero_bal_with_overdue |
-        reject_missing_acct | reject_equal_no_months | reject_overdue_exceeds_balance
+        reject_empty | reject_nan | reject_bal_positive |
+        reject_missing_acct | reject_equal_no_months |
+        reject_invalid_class | reject_invalid_status | reject_empty_status
     )
     
     if all_reject.any():
@@ -733,9 +862,10 @@ def apply_business_rules(df, mapped_columns, all_columns=None):
         logger.info(
             f"Rejected {all_reject.sum()} rows total ("
             f"{reject_empty.sum()} empty balance, {reject_nan.sum()} non-numeric, "
-            f"{reject_bal_positive.sum()} missing fields, {reject_zero_bal_with_overdue.sum()} zero-balance with overdue, "
+            f"{reject_bal_positive.sum()} missing fields, "
             f"{reject_missing_acct.sum()} missing account, {reject_equal_no_months.sum()} equal balance/overdue no months, "
-            f"{reject_overdue_exceeds_balance.sum()} overdue>balance)"
+            f"{reject_invalid_class.sum()} invalid classification, {reject_invalid_status.sum()} invalid status, "
+            f"{reject_empty_status.sum()} empty status)"
         )
     else:
         rejected_df = pd.DataFrame()
@@ -961,7 +1091,7 @@ def read_uploaded_file_sheet(file_path, sheet_name=None, header=0):
                 return pd.read_excel(file_path, sheet_name=sheet_name, dtype=str, engine='xlrd', header=header)
 
 
-def excel_to_csv_streaming(file_path, output_path, sheet_name=None, header_row=0):
+def excel_to_csv_streaming(file_path, output_path, sheet_name=None, header_row=0, account_col_name=None):
     """
     Convert an .xlsx file to CSV using openpyxl read_only streaming mode.
 
@@ -969,10 +1099,11 @@ def excel_to_csv_streaming(file_path, output_path, sheet_name=None, header_row=0
     safe for files that would otherwise exhaust memory via pd.read_excel().
 
     Args:
-        file_path:   source .xlsx file path
-        output_path: destination .csv path (will be overwritten if it exists)
-        sheet_name:  sheet to read; None = first/active sheet
-        header_row:  0-based row index of the header; rows before it are skipped
+        file_path:        source .xlsx file path
+        output_path:       destination .csv path (will be overwritten if it exists)
+        sheet_name:        sheet to read; None = first/active sheet
+        header_row:        0-based row index of the header; rows before it are skipped
+        account_col_name:  optional source column name mapping to account_number
 
     Returns: output_path
 
@@ -990,12 +1121,33 @@ def excel_to_csv_streaming(file_path, output_path, sheet_name=None, header_row=0
             else:
                 ws = wb.active
 
+            account_col_idx = None
+            header_row_1 = header_row + 1
+
+            if account_col_name:
+                for row in ws.iter_rows(min_row=header_row_1, max_row=header_row_1):
+                    for idx, cell in enumerate(row):
+                        if cell.value == account_col_name:
+                            account_col_idx = idx
+                            break
+                    break
+
             with open(output_path, 'w', newline='', encoding='utf-8') as f:
                 writer = _csv.writer(f)
-                for row_idx, row in enumerate(ws.iter_rows(values_only=True)):
-                    if row_idx < header_row:
-                        continue  # skip pre-header rows
-                    writer.writerow(['' if v is None else str(v) for v in row])
+                if account_col_idx is not None:
+                    for row in ws.iter_rows(min_row=header_row_1):
+                        row_values = []
+                        for idx, cell in enumerate(row):
+                            val = cell.value
+                            if idx == account_col_idx and val is not None:
+                                val = _reconstruct_account_value(cell.value, cell.data_type, cell.number_format)
+                            row_values.append('' if val is None else str(val))
+                        writer.writerow(row_values)
+                else:
+                    for row_idx, row in enumerate(ws.iter_rows(values_only=True)):
+                        if row_idx < header_row:
+                            continue  # skip pre-header rows
+                        writer.writerow(['' if v is None else str(v) for v in row])
         finally:
             wb.close()
 
@@ -1015,23 +1167,78 @@ def build_sheet_name(subscriber, date=None, index=None, name_override=None):
     """
     Build a normalised sheet name from a Subscriber instance.
     Pattern: {subscriber_id}_{ddmmyyyy}_{subscriber_name_lower}
-    Appends _{index} suffix for multi-sheet uploads (index >= 2).
+    Appends _{index} suffix for subsequent sheets (index >= 1).
+    Automatically queries the database to find the next available unique suffix if name is already taken.
 
     Args:
         subscriber: Subscriber model instance
-        date: datetime.date or datetime.datetime; defaults to today
-        index: int or None — if provided and >= 2, appended as suffix
+        date: date, datetime, or raw string date segment from the filename
+        index: int or None — index of the suffix (e.g. 1 for '_1' on the second sheet)
         name_override: str or None — if provided, overrides subscriber.subscriber_name
     Returns:
         str sheet name safe for use as Excel sheet name and SQL table name
     """
     from datetime import date as _date
-    d = date or _date.today()
-    sub_name = name_override if name_override else subscriber.subscriber_name
-    base = f"{subscriber.subscriber_id}_{d.strftime('%d%m%Y')}_{sub_name.lower()}"
-    if index is not None and index >= 2:
-        base = f"{base}_{index}"
-    return base
+    import re
+    if isinstance(date, str) and date:
+        d_str = date
+    else:
+        d = date or _date.today()
+        d_str = d.strftime('%d%m%Y')
+    sub_name = name_override if name_override else (subscriber.subscriber_name or 'subscriber')
+    # Clean and tokenize subscriber name
+    raw_tokens = [t for t in re.split(r'[\s_\-]+', sub_name.strip()) if t]
+    cleaned_tokens = [re.sub(r'[^a-zA-Z0-9]', '', t).lower() for t in raw_tokens]
+    cleaned_tokens = [t for t in cleaned_tokens if t]
+
+    # Skip leading numeric identifiers (e.g. "388 - The Alternative Bank" -> skip "388")
+    while cleaned_tokens and cleaned_tokens[0].isdigit() and len(cleaned_tokens) > 1:
+        cleaned_tokens.pop(0)
+
+    # Filter out corporate boilerplate words unless they are the only words present
+    boilerplate = {
+        'bank', 'banking', 'plc', 'limited', 'ltd', 'mfb', 'microfinance',
+        'cooperative', 'corp', 'corporation', 'holdings', 'group',
+    }
+    meaningful_tokens = [t for t in cleaned_tokens if t not in boilerplate]
+    if not meaningful_tokens:
+        meaningful_tokens = cleaned_tokens or ['subscriber']
+
+    # Compute budget for subscriber slug within Excel's 31-char limit
+    # Prefix format: "{sub_id}_{ddmmyyyy}_" (e.g. "388_14092026_" -> 13 chars)
+    # Reserve 3 chars for potential multi-sheet suffix (e.g. "_1" or "_10")
+    prefix = f"{subscriber.subscriber_id}_{d_str}_"
+    max_slug_len = max(5, 31 - len(prefix) - 3)
+
+    # Combine tokens that fit within the budget (e.g. "the" + "alternative" -> "thealternative")
+    slug = ""
+    for word in meaningful_tokens:
+        if not slug:
+            slug = word[:max_slug_len]
+        elif len(slug) + len(word) <= max_slug_len:
+            slug += word
+        else:
+            break
+
+    clean_sub_name = slug or 'subscriber'
+    base = f"{subscriber.subscriber_id}_{d_str}_{clean_sub_name}"
+
+    from .models import UploadSession
+
+    # If index is None, check the base name first. If it is already in the DB, start searching base_1, base_2...
+    if index is None:
+        candidate = base
+        if not UploadSession.objects.filter(sheet_name__iexact=candidate).exists():
+            return candidate[:31]
+        current_suffix = 1
+    else:
+        current_suffix = index
+
+    while True:
+        candidate = f"{base}_{current_suffix}"
+        if not UploadSession.objects.filter(sheet_name__iexact=candidate).exists():
+            return candidate[:31]
+        current_suffix += 1
 
 
 def generate_sql_script(sheet_name):
@@ -1074,29 +1281,61 @@ def get_batchupdate_connection():
     )
     if settings.BATCHUPDATE_TRUSTED_CONNECTION.lower() == 'yes':
         conn_str += "Trusted_Connection=yes;"
+    else:
+        user = getattr(settings, 'BATCHUPDATE_USER', '')
+        password = getattr(settings, 'BATCHUPDATE_PASSWORD', '')
+        if user:
+            conn_str += f"UID={user};PWD={password};"
+    logger.info(f"Connecting to BatchUpdate SQL Server: [{settings.BATCHUPDATE_SERVER}], Database: [{settings.BATCHUPDATE_DB}]")
     return pyodbc.connect(conn_str)
 
 
 def get_subscribers_from_batchupdate():
     """
-    Return subscriber list from BatchUpdate's Sheet1 table.
-    Result is cached for SUBSCRIBER_CACHE_TTL seconds (default 5 min) to avoid
-    a SQL Server round-trip on every page load.
-    Returns a list of dicts: [{'subscriber_id': int, 'subscriber_name': str}, ...]
+    Return subscriber list.
+    Tries XDSNigeriaBureauAdmin..SubscriberDataLoad from the Bureau DB (Bentley) first,
+    falling back to BatchSubscriber (Sheet1) if unreachable.
+    Cached for SUBSCRIBER_CACHE_TTL seconds (default 5 min).
     """
     from django.core.cache import cache
     from django.conf import settings as _settings
-    from .models import BatchSubscriber
 
     cache_key = 'subscribers_list'
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
 
-    result = [
-        {'subscriber_id': int(row['subscriber_id']), 'subscriber_name': row['subscriber_name']}
-        for row in BatchSubscriber.objects.order_by('subscriber_name').values('subscriber_id', 'subscriber_name')
-    ]
+    result = []
+    try:
+        from extraction.services import get_bureau_connection
+        conn = get_bureau_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT subscribername, subscriberid
+                FROM XDSNigeriaBureauAdmin..SubscriberDataLoad WITH (NOLOCK)
+                WHERE subscriberid IS NOT NULL AND subscribername IS NOT NULL
+                ORDER BY subscribername
+            """)
+            result = [
+                {'subscriber_id': int(row[1]), 'subscriber_name': str(row[0]).strip()}
+                for row in cursor.fetchall()
+                if row[0] and row[1]
+            ]
+        finally:
+            conn.close()
+    except Exception as bureau_err:
+        logger.warning(f"Could not load subscribers from Bureau DB: {bureau_err}. Trying BatchSubscriber fallback...")
+        try:
+            from .models import BatchSubscriber
+            result = [
+                {'subscriber_id': int(row['subscriber_id']), 'subscriber_name': row['subscriber_name']}
+                for row in BatchSubscriber.objects.order_by('subscriber_name').values('subscriber_id', 'subscriber_name')
+            ]
+        except Exception as local_err:
+            logger.error(f"Failed to load subscribers from both Bureau and local BatchSubscriber: {local_err}")
+            result = []
+
     ttl = getattr(_settings, 'SUBSCRIBER_CACHE_TTL', 300)
     cache.set(cache_key, result, ttl)
     return result
@@ -1142,7 +1381,7 @@ def upload_raw_to_batchupdate(df, table_name):
         for i in range(0, len(data), batch_size):
             batch = data[i:i + batch_size]
             cursor.executemany(insert_sql, batch)
-            conn.commit()
+        conn.commit()
 
         return len(data)
 
@@ -1216,7 +1455,7 @@ def upload_parquet_to_batchupdate(parquet_path, table_name):
             # Convert NaN to None for SQL NULL
             data = df.where(df.notna(), None).values.tolist()
             cursor.executemany(insert_sql, data)
-            conn.commit()
+        conn.commit()
 
         logger.info(f"Stream-uploaded Parquet to BatchUpdate table [{safe_table}]")
         return parquet_file.metadata.num_rows
@@ -1229,3 +1468,101 @@ def upload_parquet_to_batchupdate(parquet_path, table_name):
         cursor.close()
         conn.close()
 
+
+def write_parquet_as_excel(parquet_path, base_name, output_dest):
+    """
+    Read a Parquet file and stream-write it to an Excel workbook in constant_memory mode.
+    The workbook writes directly to the output_dest (file path or file-like object).
+    """
+    import pyarrow.parquet as pq
+    import xlsxwriter
+    import pandas as pd
+
+    workbook = xlsxwriter.Workbook(output_dest, {'constant_memory': True})
+    sheet_title = base_name[:31]  # Excel sheet name limit
+    ws = workbook.add_worksheet(sheet_title)
+
+    # Formats must be combined upfront — xlsxwriter applies format at write time
+    header_format = workbook.add_format({'bold': False})
+    # AccountNo: text + left-aligned in one combined format
+    account_format = workbook.add_format({'num_format': '@', 'align': 'left'})
+    text_format = workbook.add_format({'num_format': '@'})
+    numeric_format = workbook.add_format({'num_format': 'General'})
+
+    numeric_names = {'CurrentBalanceAmt', 'AmountOverdue', 'MonthsInArrears'}
+    text_names = {'LoanClassification', 'AccountStatusCode'}
+    account_no_names = {'AccountNo'}
+
+    # Read schema/headers from Parquet metadata
+    pf = pq.ParquetFile(parquet_path)
+    headers = pf.schema_arrow.names
+
+    # Write header row
+    for col_idx, header in enumerate(headers):
+        ws.write(0, col_idx, header, header_format)
+
+    # Write data rows in batches to keep memory flat
+    row_idx = 1
+    for batch in pf.iter_batches(batch_size=5000):
+        df = batch.to_pandas()
+        for row in df.itertuples(index=False):
+            for col_idx, val in enumerate(row):
+                header = headers[col_idx]
+                if pd.isna(val) or val is None:
+                    ws.write_blank(row_idx, col_idx, None)
+                    continue
+
+                if header in account_no_names:
+                    ws.write_string(row_idx, col_idx, str(val), account_format)
+                elif header in text_names:
+                    ws.write_string(row_idx, col_idx, str(val), text_format)
+                elif header in numeric_names:
+                    try:
+                        ws.write_number(row_idx, col_idx, float(val), numeric_format)
+                    except (ValueError, TypeError):
+                        ws.write(row_idx, col_idx, val, numeric_format)
+                else:
+                    ws.write(row_idx, col_idx, val)
+            row_idx += 1
+
+    workbook.close()
+
+
+def get_subscriber_historical_targets(subscriber_id, exclude_session_id=None):
+    """
+    Retrieve the set of target column names that were mapped in previous successful
+    upload session(s) for a given subscriber.
+    
+    Used by auto-mapping to detect when an expected column (e.g. months_in_arrears)
+    is missing from a newly uploaded return file due to a header typo
+    (e.g. monthinarrearsdays) or naming variation.
+    
+    Returns:
+        set: Target column internal names, e.g. {'account_number', 'CurrentBalanceAmt', 'months_in_arrears'}
+    """
+    if not subscriber_id:
+        return set()
+
+    from .models import ColumnMapping, UploadSession
+
+    qs = (
+        UploadSession.objects
+        .filter(subscriber_id=subscriber_id)
+        .exclude(status='error')
+        .prefetch_related('mappings')
+        .order_by('-uploaded_at')
+    )
+    if exclude_session_id:
+        qs = qs.exclude(id=exclude_session_id)
+
+    # Inspect the most recent session with non-empty mappings
+    for prev in qs[:10]:
+        targets = set(
+            prev.mappings.filter(target_column__isnull=False)
+            .exclude(target_column='')
+            .values_list('target_column', flat=True)
+        )
+        if targets:
+            return targets
+
+    return set()

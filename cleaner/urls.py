@@ -7,4 +7,6 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('', include('acctmgt.urls')),
     path('', include('update.urls')),
+    path('extraction/', include('extraction.urls')),
+    path('unupdated/', include('unupdated.urls')),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

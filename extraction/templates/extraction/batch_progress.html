@@ -1,0 +1,348 @@
+{% extends "base.html" %}
+{% block title %}Extraction Progress — Batch Support System{% endblock %}
+{% block nav_extraction %}active{% endblock %}
+{% block topbar_breadcrumb %}
+<div class="breadcrumb">
+    <a href="{% url 'extraction:general' %}">Extraction</a>
+    <span class="sep">/</span>
+    Batch Progress
+</div>
+{% endblock %}
+{% block topbar_title %}<div class="page-title">Extraction Progress</div>{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* ── Stat Cards ───────────────────────────────────────── */
+    .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 1rem;
+        margin-bottom: 1.5rem;
+    }
+    .stat-card {
+        background: white;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 1.1rem 1.25rem;
+        text-align: center;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    }
+    .stat-card .s-value {
+        font-size: 1.6rem;
+        font-weight: 700;
+        color: #1e293b;
+    }
+    .stat-card .s-label {
+        font-size: 0.75rem;
+        color: #64748b;
+        margin-top: 0.2rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        font-weight: 600;
+    }
+
+    /* ── Action Bar ───────────────────────────────────────── */
+    .action-bar {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 1.25rem;
+        flex-wrap: wrap;
+    }
+    .dl-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.6rem 1.25rem;
+        border-radius: 10px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+        text-decoration: none;
+        border: none;
+        transition: all 0.2s;
+    }
+    .dl-btn-primary {
+        background: linear-gradient(135deg, #1b3f8f, #2b56b8);
+        color: white;
+    }
+    .dl-btn-primary:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(27,63,143,0.3); }
+    .dl-btn-primary:disabled, .dl-btn-primary.disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+        pointer-events: none;
+    }
+    .dl-btn-secondary {
+        background: #f1f5f9;
+        color: #334155;
+        border: 1px solid #e2e8f0;
+    }
+    .dl-btn-secondary:hover { background: #e2e8f0; }
+    .batch-status-label {
+        margin-left: auto;
+        font-size: 0.82rem;
+        color: #64748b;
+    }
+
+    /* ── Progress Table ───────────────────────────────────── */
+    .progress-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.85rem;
+    }
+    .progress-table th {
+        background: #f8fafc;
+        padding: 0.65rem 0.75rem;
+        text-align: left;
+        font-weight: 600;
+        color: #64748b;
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        border-bottom: 1px solid #e2e8f0;
+    }
+    .progress-table td {
+        padding: 0.65rem 0.75rem;
+        border-bottom: 1px solid #f1f5f9;
+        color: #334155;
+    }
+    .progress-table tr:hover td { background: #f8fafc; }
+    .sub-name { font-weight: 600; color: #1e293b; }
+    .sub-id-label { font-size: 0.72rem; color: #94a3b8; margin-left: 0.3rem; }
+    .row-count {
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+    }
+
+    /* ── Status Badges ────────────────────────────────────── */
+    .sb {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        padding: 0.18rem 0.6rem;
+        border-radius: 9999px;
+        font-size: 0.72rem;
+        font-weight: 600;
+    }
+    .sb::before { content: ''; width: 5px; height: 5px; border-radius: 50%; }
+    .sb-pending { background: rgba(245,158,11,0.12); color: #d97706; }
+    .sb-pending::before { background: #f59e0b; }
+    .sb-processing { background: rgba(59,130,246,0.12); color: #2563eb; }
+    .sb-processing::before { background: #3b82f6; animation: pulse-dot 1.5s infinite; }
+    .sb-completed { background: rgba(34,197,94,0.12); color: #16a34a; }
+    .sb-completed::before { background: #22c55e; }
+    .sb-cancelled { background: rgba(100,116,139,0.12); color: #64748b; }
+    .sb-cancelled::before { background: #94a3b8; }
+    .sb-error { background: rgba(239,68,68,0.12); color: #ef4444; }
+    .sb-error::before { background: #ef4444; }
+
+    /* ── Action Links ─────────────────────────────────────── */
+    .action-link {
+        font-size: 0.8rem;
+        font-weight: 500;
+        text-decoration: none;
+        padding: 0.25rem 0.6rem;
+        border-radius: 6px;
+        transition: all 0.15s;
+    }
+    .action-link-download { color: #3b82f6; }
+    .action-link-download:hover { background: #eff6ff; }
+    .action-link-retry { color: #f59e0b; }
+    .action-link-retry:hover { background: #fefce8; }
+    .action-link-cancel { color: #ef4444; }
+    .action-link-cancel:hover { background: #fef2f2; }
+
+    /* ── Error Tooltip ────────────────────────────────────── */
+    .error-msg {
+        font-size: 0.72rem;
+        color: #ef4444;
+        max-width: 200px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Stats -->
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="s-value" id="statTotal">{{ sessions|length }}</div>
+        <div class="s-label">Subscribers</div>
+    </div>
+    <div class="stat-card">
+        <div class="s-value" id="statCompleted">0</div>
+        <div class="s-label">Completed</div>
+    </div>
+    <div class="stat-card">
+        <div class="s-value" id="statConsumer">0</div>
+        <div class="s-label">Consumer Rows</div>
+    </div>
+    <div class="stat-card">
+        <div class="s-value" id="statCommercial">0</div>
+        <div class="s-label">Commercial Rows</div>
+    </div>
+
+</div>
+
+<!-- Actions -->
+<div class="action-bar">
+    <a id="downloadMasterBtn" class="dl-btn dl-btn-primary disabled"
+       href="{% url 'extraction:download_batch' batch_id=batch.batch_id %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        Download All (.zip)
+    </a>
+
+    <a href="{% url 'extraction:general' %}" class="dl-btn dl-btn-secondary">← Back to Extraction</a>
+    <span class="batch-status-label" id="batchStatusLabel">Status: {{ batch.get_status_display }}</span>
+</div>
+
+<!-- Progress Table -->
+<div class="card" style="padding:0; overflow:hidden;">
+    <table class="progress-table">
+        <thead>
+            <tr>
+                <th>Subscriber</th>
+                <th>Status</th>
+                <th>Consumer Rows</th>
+                <th>Commercial Rows</th>
+
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody id="sessionsTableBody">
+            {% for session in sessions %}
+            <tr data-session-id="{{ session.id }}">
+                <td>
+                    <span class="sub-name">{{ session.subscriber_name }}</span>
+                    <span class="sub-id-label">ID: {{ session.subscriber_id }}</span>
+                </td>
+                <td><span class="sb sb-{{ session.status }}">{{ session.get_status_display }}</span></td>
+                <td class="row-count consumer-rows">{{ session.consumer_rows|default:"—" }}</td>
+                <td class="row-count commercial-rows">{{ session.commercial_rows|default:"—" }}</td>
+
+                <td class="session-actions">
+                    {% if session.status == 'completed' and session.subscriber_zip %}
+                        <a href="{% url 'extraction:download_subscriber' session_id=session.id %}" class="action-link action-link-download">↓ Download</a>
+                    {% elif session.status == 'error' %}
+                        <form method="POST" action="{% url 'extraction:retry' session_id=session.id %}" style="display:inline;">
+                            {% csrf_token %}
+                            <button type="submit" class="action-link action-link-retry" style="border:none;background:none;cursor:pointer;">↻ Retry</button>
+                        </form>
+                        <span class="error-msg" title="{{ session.error_message }}">{{ session.error_message|truncatechars:40 }}</span>
+                    {% elif session.status == 'pending' or session.status == 'processing' %}
+                        <form method="POST" action="{% url 'extraction:cancel_session' session_id=session.id %}" style="display:inline;">
+                            {% csrf_token %}
+                            <button type="submit" class="action-link action-link-cancel" style="border:none;background:none;cursor:pointer;"
+                                    onclick="return confirm('Cancel extraction for {{ session.subscriber_name }}?');">✕ Cancel</button>
+                        </form>
+                    {% else %}
+                        —
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+    var batchId = "{{ batch.batch_id }}";
+    var statusUrl = "{% url 'extraction:batch_status' batch_id=batch.batch_id %}";
+    var pollInterval = null;
+    var csrfToken = "{{ csrf_token }}";
+
+    function formatNumber(n) {
+        return n ? n.toLocaleString() : '0';
+    }
+
+    function pollStatus() {
+        fetch(statusUrl)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            // Update stat cards
+            document.getElementById('statCompleted').textContent = data.completed_count;
+            document.getElementById('statConsumer').textContent = formatNumber(data.total_consumer_rows);
+            document.getElementById('statCommercial').textContent = formatNumber(data.total_commercial_rows);
+            document.getElementById('statAgric').textContent = formatNumber(data.total_agric_count);
+
+            // Update batch status label
+            document.getElementById('batchStatusLabel').textContent = 'Status: ' + data.batch_status;
+
+            // Enable master download button
+            var masterBtn = document.getElementById('downloadMasterBtn');
+            if (data.has_master_zip) {
+                masterBtn.classList.remove('disabled');
+            } else {
+                masterBtn.classList.add('disabled');
+            }
+
+            // Update each session row
+            data.sessions.forEach(function(s) {
+                var row = document.querySelector('tr[data-session-id="' + s.id + '"]');
+                if (!row) return;
+
+                // Status badge
+                var statusCell = row.children[1];
+                statusCell.innerHTML = '<span class="sb sb-' + s.status + '">' +
+                    s.status.charAt(0).toUpperCase() + s.status.slice(1) + '</span>';
+
+                // Row counts
+                row.querySelector('.consumer-rows').textContent = s.consumer_rows ? formatNumber(s.consumer_rows) : '—';
+                row.querySelector('.commercial-rows').textContent = s.commercial_rows ? formatNumber(s.commercial_rows) : '—';
+
+
+                // Actions
+                var actionsCell = row.querySelector('.session-actions');
+                if (s.status === 'completed' && s.has_zip) {
+                    actionsCell.innerHTML = '<a href="/extraction/general/download-subscriber/' + s.id + '/" class="action-link action-link-download">↓ Download</a>';
+                } else if (s.status === 'error') {
+                    actionsCell.innerHTML =
+                        '<form method="POST" action="/extraction/general/retry/' + s.id + '/" style="display:inline;">' +
+                        '<input type="hidden" name="csrfmiddlewaretoken" value="' + csrfToken + '">' +
+                        '<button type="submit" class="action-link action-link-retry" style="border:none;background:none;cursor:pointer;">↻ Retry</button>' +
+                        '</form>' +
+                        '<span class="error-msg" title="' + (s.error_message || '') + '">' + (s.error_message || '').substring(0, 40) + '</span>';
+                } else if (s.status === 'pending' || s.status === 'processing') {
+                    actionsCell.innerHTML =
+                        '<form method="POST" action="/extraction/general/cancel-subscriber/' + s.id + '/" style="display:inline;">' +
+                        '<input type="hidden" name="csrfmiddlewaretoken" value="' + csrfToken + '">' +
+                        '<button type="submit" class="action-link action-link-cancel" style="border:none;background:none;cursor:pointer;"' +
+                        ' onclick="return confirm(\'Cancel extraction?\');">✕ Cancel</button>' +
+                        '</form>';
+                } else if (s.status === 'cancelled') {
+                    actionsCell.innerHTML = '<span class="error-msg" style="color:#64748b;">Cancelled</span>';
+                }
+            });
+
+            // Stop polling when batch is done
+            if (data.batch_status === 'completed' || data.batch_status === 'error' || data.batch_status === 'cancelled') {
+                clearInterval(pollInterval);
+            }
+        })
+        .catch(function(err) {
+            console.error('Status poll error:', err);
+        });
+    }
+
+    // Poll every 3 seconds while batch is active (pending or processing)
+    {% if batch.status == 'pending' or batch.status == 'processing' %}
+    pollInterval = setInterval(pollStatus, 3000);
+    // Also run immediately
+    pollStatus();
+    {% else %}
+    // Batch already done — run once to populate stats
+    pollStatus();
+    {% endif %}
+})();
+</script>
+{% endblock %}

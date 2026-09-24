@@ -1,4 +1,4 @@
-﻿{% extends 'base.html' %}
+{% extends 'base.html' %}
 
 {% block title %}Batch Upload &mdash; {{ source_filename }}{% endblock %}
 
@@ -118,6 +118,15 @@
     .db-yes     { background: rgba(34,197,94,0.12); color: #15803d; }
     .db-no      { background: rgba(239,68,68,0.12); color: #b91c1c; }
     .db-pending { background: rgba(245,158,11,0.12); color: #d97706; }
+    .db-uploading { background: rgba(59,130,246,0.12); color: #2563eb; }
+    .db-uploading::after {
+        content: '';
+        width: 5px; height: 5px;
+        border-radius: 50%;
+        background: #3b82f6;
+        animation: pulse-dot 1.5s infinite;
+    }
+    @keyframes pulse-dot { 0%,100%{opacity:1;} 50%{opacity:0.3;} }
 
     /* Bulk download strip */
     .bulk-strip {
@@ -125,6 +134,95 @@
         border-radius: 10px; padding: 1rem 1.25rem;
         display: flex; align-items: center; gap: 0.75rem;
         flex-wrap: wrap;
+    }
+
+    /* Modal Overlay styling */
+    .modal-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.45);
+        backdrop-filter: blur(4px);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 1000;
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity 0.3s ease, visibility 0.3s ease;
+    }
+
+    .modal-overlay.show {
+        opacity: 1;
+        visibility: visible;
+    }
+
+    .modal-box {
+        background: #fff;
+        border-radius: 12px;
+        padding: 2rem;
+        max-width: 480px;
+        width: 90%;
+        box-shadow: 0 20px 40px rgba(0,0,0,0.15);
+        text-align: center;
+        transform: scale(0.9);
+        transition: transform 0.3s ease;
+    }
+
+    .modal-overlay.show .modal-box {
+        transform: scale(1);
+    }
+
+    .modal-icon {
+        font-size: 3rem;
+        margin-bottom: 0.5rem;
+    }
+
+    .modal-title {
+        font-size: 1.35rem;
+        font-weight: 600;
+        color: #1d2939;
+        margin-bottom: 0.75rem;
+    }
+
+    .modal-text {
+        font-size: 0.95rem;
+        color: #475467;
+        line-height: 1.5;
+        margin-bottom: 1.5rem;
+    }
+
+    .modal-footer {
+        display: flex;
+        justify-content: center;
+    }
+
+    .modal-btn {
+        background: #0d6efd;
+        color: #fff;
+        border: none;
+        padding: 0.6rem 2.5rem;
+        font-size: 0.95rem;
+        font-weight: 500;
+        border-radius: 8px;
+        cursor: pointer;
+        box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
+        transition: background-color 0.2s ease;
+    }
+
+    .modal-btn:hover {
+        background: #0b5ed7;
+    }
+
+    .modal-btn.btn-outline {
+        background: transparent !important;
+        color: #344054 !important;
+        border: 1px solid #d0d5dd !important;
+    }
+    .modal-btn.btn-outline:hover {
+        background: #f9fafb !important;
     }
 </style>
 {% endblock %}
@@ -189,12 +287,12 @@
         <tbody>
             {% for session in sessions %}
             <tr data-session-id="{{ session.id }}">
-                <td style="font-weight:500;">{{ session.sheet_name }}</td>
+                <td style="font-weight:500;">{{ session.original_filename }}<div style="font-size:0.68rem;color:var(--text-muted);margin-top:1px;">{{ session.sheet_name }}</div></td>
                 <td class="js-status">
                     <span class="status-badge status-{{ session.status }}">
                         {{ session.get_status_display }}
                     </span>
-                    {% if session.error_message %}
+                    {% if session.status == 'error' and session.error_message %}
                     <div style="font-size:0.72rem;color:#dc2626;margin-top:2px;" title="{{ session.error_message }}">
                         {{ session.error_message|truncatechars:50 }}
                     </div>
@@ -203,6 +301,8 @@
                 <td class="js-bu">
                     {% if session.batchupdate_uploaded %}
                         <span class="db-badge db-yes">Uploaded</span>
+                    {% elif session.status == 'uploading_to_db' %}
+                        <span class="db-badge db-uploading">Uploading...</span>
                     {% elif session.status == 'error' %}
                         <span class="db-badge db-no">Failed</span>
                     {% else %}
@@ -211,7 +311,7 @@
                 </td>
                 <td class="js-rows" style="font-size:0.85rem;">{{ session.rows_processed }}</td>
                 {% if not is_external %}
-                <td>
+                <td class="js-actions">
                     <div class="action-group">
                         {% if session.status == 'pending_mapping' %}
                             <a href="{% url 'mapping' session.id %}" class="btn-sm blue">Map</a>
@@ -230,7 +330,7 @@
                             <a href="{% url 'download_script' session.id %}" class="btn-sm violet">SQL</a>
                         {% endif %}
                         <form action="{% url 'delete_session' session.id %}" method="post" style="display:inline;"
-                              onsubmit="return confirm('Delete session for sheet {{ session.sheet_name }}?');">
+                              onsubmit="return confirm('Delete session for sheet {{ session.original_filename }}?');">
                             {% csrf_token %}
                             <button type="submit" class="btn-sm red" title="Delete">
                                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
@@ -260,12 +360,39 @@
         Download All SQL Scripts
     </a>
     {% endif %}
+    <button class="btn" style="font-size:0.82rem; display:none;" id="btnUploadAllDb" onclick="uploadAllToDb()">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        Upload All to BatchUpdate
+    </button>
     {% endif %}
     <a href="{% url 'upload' %}" class="btn btn-outline" style="font-size:0.82rem;">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
         Upload Another
     </a>
 </div>
+
+{% if request.GET.new_upload and unmapped_sheets %}
+<div class="modal-overlay" id="mappingModal">
+  <div class="modal-box" style="max-width: 540px;">
+    <div class="modal-icon">⚠️</div>
+    <div class="modal-title">Account Number Mapping Required</div>
+    <div class="modal-text" style="text-align: left;">
+      <p style="margin: 0 0 0.75rem 0; color: #475467;">The following file(s)/sheet(s) could not be auto-processed because the required <strong>Account Number</strong> header is missing:</p>
+      <ul style="margin: 0 0 1rem 0; padding-left: 1.25rem; font-weight: 600; color: #1e293b;">
+        {% for s in unmapped_sheets %}
+          <li>{{ s }}</li>
+        {% endfor %}
+      </ul>
+      <p style="margin: 0; font-size: 0.85rem; color: #64748b;">You can map columns now to continue processing, or review them individually from the batch list.</p>
+    </div>
+    <div class="modal-footer" style="gap: 1rem; margin-top: 1.25rem;">
+      <button type="button" class="modal-btn btn-outline" onclick="closeModal()">Review Batch List</button>
+      <button type="button" class="modal-btn" onclick="goToBatchMapping()">Map Columns Now →</button>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 {% endblock %}
 
 {% block extra_js %}
@@ -275,6 +402,7 @@
     'pending_mapping': {cls: 'status-pending_mapping', label: 'Pending Mapping'},
     'processing':      {cls: 'status-processing',      label: 'Processing'},
     'processed':       {cls: 'status-processed',        label: 'Processed'},
+    'uploading_to_db': {cls: 'status-processing',       label: 'Uploading to DB'},
     'uploaded':        {cls: 'status-uploaded',          label: 'Uploaded to SQL'},
     'error':           {cls: 'status-error',             label: 'Error'}
   };
@@ -303,8 +431,12 @@
 
           var statusCell = row.querySelector('.js-status');
           var info = STATUS_BADGE[sheet.status] || {cls: '', label: sheet.status_display};
-          statusCell.innerHTML = '<span class="status-badge ' + info.cls + '">' + info.label + '</span>';
-          if (sheet.error_message) {
+          var statusText = info.label;
+          if (sheet.status === 'processing' && sheet.clean_progress > 0) {
+            statusText += ' (' + sheet.clean_progress + '%)';
+          }
+          statusCell.innerHTML = '<span class="status-badge ' + info.cls + '">' + statusText + '</span>';
+          if (sheet.status === 'error' && sheet.error_message) {
             statusCell.innerHTML += '<div style="font-size:0.72rem;color:#dc2626;margin-top:2px;" title="' +
               sheet.error_message.replace(/"/g, '&quot;') + '">' +
               (sheet.error_message.length > 50 ? sheet.error_message.substring(0,50) + '...' : sheet.error_message) +
@@ -314,6 +446,10 @@
           var buCell = row.querySelector('.js-bu');
           if (sheet.batchupdate_uploaded) {
             buCell.innerHTML = '<span class="db-badge db-yes">Uploaded</span>';
+          } else if (sheet.status === 'uploading_to_db') {
+            var buPct = sheet.db_upload_progress || 0;
+            var stepText = sheet.db_upload_step || 'Uploading...';
+            buCell.innerHTML = '<span class="db-badge db-uploading">' + stepText + ' (' + buPct + '%)</span>';
           } else if (sheet.status === 'error') {
             buCell.innerHTML = '<span class="db-badge db-no">Failed</span>';
           } else {
@@ -321,21 +457,114 @@
           }
 
           row.querySelector('.js-rows').textContent = sheet.rows_processed;
+
+          // Dynamically update action buttons if sheet has finished processing
+          var actionsCell = row.querySelector('.js-actions');
+          if (actionsCell && (sheet.status === 'processed' || sheet.status === 'uploaded' || sheet.status === 'error')) {
+            var actionGroup = actionsCell.querySelector('.action-group');
+            if (actionGroup) {
+              var processingBtn = actionGroup.querySelector('a.amber');
+              if (processingBtn && processingBtn.textContent.trim().toLowerCase() === 'processing') {
+                processingBtn.outerHTML = '<a href="/result/' + sheet.id + '/" class="btn-sm blue">View</a>';
+              }
+              var deleteForm = actionGroup.querySelector('form');
+              if (sheet.has_processed_file && !actionGroup.querySelector('a.green')) {
+                var cleanedBtn = document.createElement('a');
+                cleanedBtn.href = '/download/' + sheet.id + '/';
+                cleanedBtn.className = 'btn-sm green';
+                cleanedBtn.textContent = 'Cleaned';
+                if (deleteForm) actionGroup.insertBefore(cleanedBtn, deleteForm);
+                else actionGroup.appendChild(cleanedBtn);
+              }
+              if (sheet.has_rejected_file && !actionGroup.querySelector('a[href*="download-rejected"]')) {
+                var rejBtn = document.createElement('a');
+                rejBtn.href = '/download-rejected/' + sheet.id + '/';
+                rejBtn.className = 'btn-sm amber';
+                rejBtn.textContent = 'Rejected';
+                if (deleteForm) actionGroup.insertBefore(rejBtn, deleteForm);
+                else actionGroup.appendChild(rejBtn);
+              }
+            }
+          }
         });
 
         if (data.all_done) {
           clearInterval(pollTimer);
           pollTimer = null;
+          // Smoothly reload page once all sheets finish so server bulk buttons appear
+          setTimeout(function() {
+            window.location.reload();
+          }, 800);
         }
       })
       .catch(function() {});
   }
 
   var hasProcessing = {{ has_processing|yesno:"true,false" }};
-  if (hasProcessing) {
+  var hasUploading = {{ has_uploading|yesno:"true,false" }};
+  if (hasProcessing || hasUploading) {
     pollTimer = setInterval(pollProgress, 3000);
     pollProgress();
   }
+
+  // Show/hide "Upload All to BatchUpdate" button based on whether any processed
+  // sessions exist that haven't been uploaded yet.
+  function updateBulkUploadBtn() {
+    fetch(progressUrl)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var eligible = data.sheets.filter(function(s) {
+          return s.status === 'processed' && !s.batchupdate_uploaded;
+        }).length;
+        var btn = document.getElementById('btnUploadAllDb');
+        if (btn) btn.style.display = eligible > 0 ? '' : 'none';
+      })
+      .catch(function(){});
+  }
+  updateBulkUploadBtn();
+
+  // Bulk upload all processed sessions to DB
+  var csrfToken = '{{ csrf_token }}';
+  window.uploadAllToDb = function() {
+    var btn = document.getElementById('btnUploadAllDb');
+    if (btn) { btn.disabled = true; btn.textContent = 'Uploading...'; }
+
+    fetch('{% url "upload_batch_to_db" batch_id %}', {
+      method: 'POST',
+      headers: {'X-CSRFToken': csrfToken, 'Content-Type': 'application/json'},
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.ok) {
+        if (!pollTimer) {
+          pollTimer = setInterval(pollProgress, 3000);
+        }
+        pollProgress();
+        if (btn) btn.style.display = 'none';
+      }
+    })
+    .catch(function(err) { if (btn) { btn.disabled = false; btn.textContent = 'Upload All to BatchUpdate'; } });
+  };
+
+  window.closeModal = function() {
+    const modal = document.getElementById('mappingModal');
+    if (modal) {
+      modal.classList.remove('show');
+      setTimeout(() => modal.remove(), 300);
+    }
+  }
+
+  window.goToBatchMapping = function() {
+    window.location.href = "{% url 'batch_mapping' batch_id %}";
+  }
+
+  // Trigger modal if present
+  document.addEventListener('DOMContentLoaded', function() {
+    const modal = document.getElementById('mappingModal');
+    if (modal) {
+      setTimeout(() => modal.classList.add('show'), 50);
+    }
+  });
 })();
 </script>
 {% endblock %}

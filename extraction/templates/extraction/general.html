@@ -1,0 +1,468 @@
+{% extends "base.html" %}
+{% block title %}General Extraction — Batch Support System{% endblock %}
+{% block nav_extraction %}active{% endblock %}
+{% block topbar_title %}<div class="page-title">General Extraction</div>{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* ── Extraction Form Card ─────────────────────────────── */
+    .extraction-card {
+        background: white;
+        border-radius: 14px;
+        border: 1px solid #e2e8f0;
+        padding: 2rem;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+        max-width: 800px;
+    }
+    .extraction-card h2 {
+        font-size: 1.15rem;
+        font-weight: 700;
+        margin-bottom: 0.25rem;
+        color: #1e293b;
+    }
+    .extraction-card .subtitle {
+        font-size: 0.82rem;
+        color: #64748b;
+        margin-bottom: 1.5rem;
+    }
+
+    /* ── Subscriber Multi-Select ──────────────────────────── */
+    .subscriber-search-wrap {
+        position: relative;
+        margin-bottom: 1.25rem;
+    }
+    .subscriber-search-wrap label {
+        display: block;
+        font-weight: 600;
+        font-size: 0.9rem;
+        margin-bottom: 0.4rem;
+        color: #1e293b;
+    }
+    .search-input {
+        width: 100%;
+        padding: 0.7rem 1rem 0.7rem 2.5rem;
+        border: 1px solid #e2e8f0;
+        border-radius: 10px;
+        font-size: 0.95rem;
+        outline: none;
+        transition: border-color 0.2s;
+        background: white;
+    }
+    .search-input:focus { border-color: #3b82f6; }
+    .search-icon {
+        position: absolute;
+        left: 0.85rem;
+        top: 2.45rem;
+        color: #94a3b8;
+        pointer-events: none;
+    }
+    .search-results {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        background: white;
+        border: 1px solid #e2e8f0;
+        border-radius: 10px;
+        max-height: 240px;
+        overflow-y: auto;
+        z-index: 100;
+        display: none;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+        margin-top: 4px;
+    }
+    .search-results.visible { display: block; }
+    .search-result-item {
+        padding: 0.6rem 1rem;
+        cursor: pointer;
+        font-size: 0.88rem;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        transition: background 0.12s;
+    }
+    .search-result-item:hover { background: #f1f5f9; }
+    .search-result-item .sub-id {
+        font-size: 0.72rem;
+        color: #94a3b8;
+        background: #f1f5f9;
+        padding: 0.1rem 0.5rem;
+        border-radius: 6px;
+    }
+    .search-result-item.selected { background: #eff6ff; }
+    .search-loading, .search-empty {
+        padding: 0.8rem 1rem;
+        font-size: 0.85rem;
+        color: #94a3b8;
+        text-align: center;
+    }
+
+    /* ── Selected Tags ────────────────────────────────────── */
+    .selected-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        margin-top: 0.75rem;
+        min-height: 32px;
+    }
+    .tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        background: linear-gradient(135deg, #eff6ff, #dbeafe);
+        color: #1d4ed8;
+        padding: 0.3rem 0.7rem;
+        border-radius: 8px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        animation: tagIn 0.2s ease;
+    }
+    @keyframes tagIn { from { transform: scale(0.85); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+    .tag .tag-remove {
+        cursor: pointer;
+        color: #93c5fd;
+        font-size: 1rem;
+        line-height: 1;
+        transition: color 0.15s;
+    }
+    .tag .tag-remove:hover { color: #ef4444; }
+
+    /* ── Category Toggles ─────────────────────────────────── */
+    .category-section {
+        margin-bottom: 1.5rem;
+    }
+    .category-section label.section-label {
+        display: block;
+        font-weight: 600;
+        font-size: 0.9rem;
+        margin-bottom: 0.6rem;
+        color: #1e293b;
+    }
+    .toggle-row {
+        display: flex;
+        gap: 1rem;
+        flex-wrap: wrap;
+    }
+    .toggle-item {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.6rem 1rem;
+        border: 1px solid #e2e8f0;
+        border-radius: 10px;
+        cursor: pointer;
+        transition: all 0.2s;
+        user-select: none;
+    }
+    .toggle-item:hover { border-color: #3b82f6; background: #f8fafc; }
+    .toggle-item input[type="checkbox"] {
+        width: 17px;
+        height: 17px;
+        cursor: pointer;
+        accent-color: #3b82f6;
+    }
+    .toggle-item span {
+        font-size: 0.88rem;
+        font-weight: 500;
+        color: #334155;
+    }
+
+    /* ── Submit Button ─────────────────────────────────────── */
+    .start-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.75rem 1.75rem;
+        background: linear-gradient(135deg, #1b3f8f, #2b56b8);
+        color: white;
+        border: none;
+        border-radius: 10px;
+        font-size: 0.95rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    .start-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(27,63,143,0.35); }
+    .start-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+
+    /* ── Recent Batches Table ──────────────────────────────── */
+    .recent-section {
+        margin-top: 2rem;
+    }
+    .recent-section h3 {
+        font-size: 1rem;
+        font-weight: 600;
+        margin-bottom: 0.75rem;
+        color: #1e293b;
+    }
+    .recent-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.85rem;
+    }
+    .recent-table th {
+        background: #f8fafc;
+        padding: 0.6rem 0.75rem;
+        text-align: left;
+        font-weight: 600;
+        color: #64748b;
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        border-bottom: 1px solid #e2e8f0;
+    }
+    .recent-table td {
+        padding: 0.6rem 0.75rem;
+        border-bottom: 1px solid #f1f5f9;
+        color: #334155;
+    }
+    .recent-table tr:hover td { background: #f8fafc; }
+    .status-badge-sm {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        padding: 0.15rem 0.55rem;
+        border-radius: 9999px;
+        font-size: 0.72rem;
+        font-weight: 600;
+    }
+    .status-badge-sm::before { content: ''; width: 5px; height: 5px; border-radius: 50%; }
+    .sb-processing { background: rgba(59,130,246,0.12); color: #2563eb; }
+    .sb-processing::before { background: #3b82f6; animation: pulse-dot 1.5s infinite; }
+    .sb-completed { background: rgba(34,197,94,0.12); color: #16a34a; }
+    .sb-completed::before { background: #22c55e; }
+    .sb-error { background: rgba(239,68,68,0.12); color: #ef4444; }
+    .sb-error::before { background: #ef4444; }
+    .view-link {
+        color: #3b82f6;
+        text-decoration: none;
+        font-weight: 500;
+    }
+    .view-link:hover { text-decoration: underline; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="extraction-card">
+    <h2>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-3px; margin-right:0.4rem;">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        General Extraction
+    </h2>
+    <p class="subtitle">Search and select subscribers to extract Consumer and Commercial account data from the Bureau database.</p>
+
+    <form method="POST" action="{% url 'extraction:start' %}" id="extractionForm">
+        {% csrf_token %}
+        <input type="hidden" name="subscriber_ids" id="subscriberIdsField" value="[]">
+        <input type="hidden" name="subscriber_names" id="subscriberNamesField" value="{}">
+
+        <!-- Subscriber Multi-Select Search -->
+        <div class="subscriber-search-wrap">
+            <label for="subscriberSearch">Select Subscribers</label>
+            <svg class="search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            <input type="text" class="search-input" id="subscriberSearch"
+                   placeholder="Type to search subscribers..." autocomplete="off">
+            <div class="search-results" id="searchResults"></div>
+        </div>
+
+        <div class="selected-tags" id="selectedTags">
+            <!-- Tags rendered by JS -->
+        </div>
+
+        <!-- Extraction Category Toggles -->
+        <div class="category-section" style="margin-top:1.25rem;">
+            <label class="section-label">Extraction Categories</label>
+            <div class="toggle-row">
+                <label class="toggle-item">
+                    <input type="checkbox" name="include_consumer" checked>
+                    <span>Consumer Accounts</span>
+                </label>
+                <label class="toggle-item">
+                    <input type="checkbox" name="include_commercial" checked>
+                    <span>Commercial Accounts</span>
+                </label>
+            </div>
+        </div>
+
+        <button type="submit" class="start-btn" id="startBtn" disabled>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            Start Extraction
+        </button>
+    </form>
+</div>
+
+{% if recent_batches %}
+<div class="recent-section">
+    <h3>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px; margin-right:0.3rem;">
+            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+        </svg>
+        Recent Extractions
+    </h3>
+    <div class="card" style="padding:0; overflow:hidden;">
+        <table class="recent-table">
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Subscribers</th>
+                    <th>Consumer / Commercial</th>
+                    <th>Status</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for batch in recent_batches %}
+                <tr>
+                    <td>{{ batch.created_at|date:"d M Y H:i" }}</td>
+                    <td>
+                        {% for s in batch.sessions.all %}
+                            <span class="tag" style="margin:1px 0;">{{ s.subscriber_name }}</span>
+                        {% endfor %}
+                    </td>
+                    <td>
+                        {% if batch.include_consumer %}Consumer{% endif %}
+                        {% if batch.include_consumer and batch.include_commercial %} &amp; {% endif %}
+                        {% if batch.include_commercial %}Commercial{% endif %}
+                    </td>
+                    <td>
+                        <span class="status-badge-sm sb-{{ batch.status }}">{{ batch.get_status_display }}</span>
+                    </td>
+                    <td style="display: flex; gap: 0.5rem; justify-content: flex-end; align-items: center; border-bottom: none;">
+                        <a href="{% url 'extraction:batch_progress' batch_id=batch.batch_id %}" class="view-link">View →</a>
+                        <form method="POST" action="{% url 'extraction:delete_batch' batch_id=batch.batch_id %}" onsubmit="return confirm('Delete this extraction batch?');" style="margin:0;">
+                            {% csrf_token %}
+                            <button type="submit" style="background:none;border:none;color:var(--danger,#ef4444);cursor:pointer;font-size:0.85rem;font-weight:600;padding: 0.25rem 0.5rem;">Delete</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+    var searchInput = document.getElementById('subscriberSearch');
+    var searchResults = document.getElementById('searchResults');
+    var selectedTags = document.getElementById('selectedTags');
+    var subscriberIdsField = document.getElementById('subscriberIdsField');
+    var subscriberNamesField = document.getElementById('subscriberNamesField');
+    var startBtn = document.getElementById('startBtn');
+
+    // Track selected subscribers: { id: name }
+    var selected = {};
+    var searchTimeout = null;
+
+    function updateHiddenFields() {
+        var ids = Object.keys(selected).map(Number);
+        subscriberIdsField.value = JSON.stringify(ids);
+        subscriberNamesField.value = JSON.stringify(selected);
+        startBtn.disabled = ids.length === 0;
+    }
+
+    function renderTags() {
+        selectedTags.innerHTML = '';
+        for (var id in selected) {
+            var tag = document.createElement('span');
+            tag.className = 'tag';
+            tag.innerHTML = selected[id] +
+                ' <span class="tag-id" style="opacity:0.6;font-size:0.7rem;">(ID:' + id + ')</span>' +
+                ' <span class="tag-remove" data-id="' + id + '">&times;</span>';
+            selectedTags.appendChild(tag);
+        }
+        updateHiddenFields();
+    }
+
+    selectedTags.addEventListener('click', function(e) {
+        if (e.target.classList.contains('tag-remove')) {
+            var id = e.target.getAttribute('data-id');
+            delete selected[id];
+            renderTags();
+            // Update search results visual state
+            var items = searchResults.querySelectorAll('.search-result-item');
+            items.forEach(function(item) {
+                if (item.getAttribute('data-id') === id) {
+                    item.classList.remove('selected');
+                }
+            });
+        }
+    });
+
+    searchInput.addEventListener('input', function() {
+        clearTimeout(searchTimeout);
+        var q = searchInput.value.trim();
+        if (q.length < 2) {
+            searchResults.classList.remove('visible');
+            return;
+        }
+        searchResults.innerHTML = '<div class="search-loading">Searching...</div>';
+        searchResults.classList.add('visible');
+
+        searchTimeout = setTimeout(function() {
+            fetch("{% url 'extraction:subscriber_search' %}?q=" + encodeURIComponent(q))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (!data.results || data.results.length === 0) {
+                    searchResults.innerHTML = '<div class="search-empty">No subscribers found</div>';
+                    return;
+                }
+                var html = '';
+                data.results.forEach(function(sub) {
+                    var isSelected = selected[sub.subscriber_id] ? ' selected' : '';
+                    html += '<div class="search-result-item' + isSelected + '" data-id="' + sub.subscriber_id + '" data-name="' + sub.subscriber_name.replace(/"/g, '&quot;') + '">' +
+                        '<span>' + sub.subscriber_name + '</span>' +
+                        '<span class="sub-id">ID: ' + sub.subscriber_id + '</span>' +
+                    '</div>';
+                });
+                searchResults.innerHTML = html;
+            })
+            .catch(function() {
+                searchResults.innerHTML = '<div class="search-empty">Search failed. Try again.</div>';
+            });
+        }, 350);
+    });
+
+    searchResults.addEventListener('click', function(e) {
+        var item = e.target.closest('.search-result-item');
+        if (!item) return;
+        var id = item.getAttribute('data-id');
+        var name = item.getAttribute('data-name');
+        if (selected[id]) {
+            delete selected[id];
+            item.classList.remove('selected');
+        } else {
+            selected[id] = name;
+            item.classList.add('selected');
+        }
+        renderTags();
+        // Clear search input and hide dropdown for easy next selection
+        searchInput.value = '';
+        searchResults.classList.remove('visible');
+        searchInput.focus();
+    });
+
+    // Close search results on outside click
+    document.addEventListener('click', function(e) {
+        if (!e.target.closest('.subscriber-search-wrap')) {
+            searchResults.classList.remove('visible');
+        }
+    });
+
+    // Re-show results on focus if there is text
+    searchInput.addEventListener('focus', function() {
+        if (searchInput.value.trim().length >= 2 && searchResults.innerHTML.trim()) {
+            searchResults.classList.add('visible');
+        }
+    });
+})();
+</script>
+{% endblock %}

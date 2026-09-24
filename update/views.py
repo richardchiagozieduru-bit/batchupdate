@@ -7,19 +7,25 @@ import pandas as pd
 from io import BytesIO
 from django.core.files.base import ContentFile
 from django.shortcuts import render, redirect, get_object_or_404
+from django.urls import reverse
 from django.http import HttpResponse, JsonResponse, FileResponse
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_http_methods, require_POST
 from django_q.tasks import async_task
+from .progress import get_progress
+from .tasks import cleanup_old_dropped_files_task
 
 from django.contrib.auth.models import User
 from django.db import transaction
 
 from openpyxl import load_workbook
-from .models import UploadSession, ColumnMapping, MappingTemplate, Subscriber
-from .columns import TARGET_COLUMN_CHOICES, HEADER_MAPPING_DICTIONARY
+# pyrefly: ignore [missing-import]
+from django.http import JsonResponse
+from django.utils import timezone
+from .models import UploadSession, ColumnMapping, MappingTemplate, Subscriber, DroppedFile
+from .columns import TARGET_COLUMN_CHOICES, HEADER_MAPPING_DICTIONARY, DISPLAY_HEADERS
 from .services import (
     clean_dataframe,
     calculate_file_hash, read_uploaded_file, read_excel_file,
@@ -27,17 +33,156 @@ from .services import (
     get_excel_sheet_names, read_uploaded_file_sheet,
     generate_sql_script, upload_raw_to_batchupdate,
     detect_header_row, build_sheet_name, get_subscribers_from_batchupdate,
-    extract_sub_id,
+    extract_sub_id, write_parquet_as_excel, is_sheet_usable,
+    get_subscriber_historical_targets,
 )
-from acctmgt.utils import is_external as _is_external, require_bound as _require_bound
+from acctmgt.utils import (
+    is_external as _is_external,
+    require_bound as _require_bound,
+    is_internal_dropper,
+)
 
 logger = logging.getLogger(__name__)
 
+
+@login_required
+def drop_view(request):
+    """File drop view for non-technical internal users to deposit raw files."""
+    try:
+        cleanup_old_dropped_files_task()
+    except Exception as exc:
+        logger.warning(f"Opportunistic dropped file cleanup failed in drop_view: {exc}")
+
+    subscribers = get_subscribers_from_batchupdate()
+
+    if request.method == 'POST':
+        files = request.FILES.getlist('drop_files')
+        notes = request.POST.get('notes', '').strip()
+
+        if not files:
+            messages.error(request, 'Please select at least one file to drop.')
+            return redirect('client_drop')
+
+        file_subscribers = []
+        for i, f in enumerate(files):
+            sub_id = (request.POST.get(f'file_subscriber_{i}', '') or request.POST.get('subscriber', '')).strip()
+            if not sub_id:
+                messages.error(request, f'Please select a subscriber institution for "{f.name}".')
+                return redirect('client_drop')
+
+            try:
+                sub_id_int = int(float(sub_id))
+                sub_match = next((s for s in subscribers if s['subscriber_id'] == sub_id_int), None)
+                if not sub_match:
+                    messages.error(request, f'Invalid subscriber selected for "{f.name}".')
+                    return redirect('client_drop')
+                selected_sub, _ = Subscriber.objects.get_or_create(
+                    subscriber_id=sub_id_int,
+                    defaults={'subscriber_name': sub_match['subscriber_name']}
+                )
+                file_subscribers.append(selected_sub)
+            except (ValueError, TypeError):
+                messages.error(request, f'Invalid subscriber selected for "{f.name}".')
+                return redirect('client_drop')
+
+        for i, f in enumerate(files):
+            DroppedFile.objects.create(
+                user=request.user,
+                subscriber=file_subscribers[i],
+                file=f,
+                original_filename=f.name,
+                file_size_bytes=f.size,
+                notes=notes,
+            )
+
+        if len(set(s.subscriber_id for s in file_subscribers)) == 1:
+            msg = f"Successfully deposited {len(files)} file(s) for {file_subscribers[0].subscriber_name} into the drop box. Awaiting bureau administration review."
+        else:
+            msg = f"Successfully deposited {len(files)} file(s) across {len(set(s.subscriber_id for s in file_subscribers))} institutions into the drop box. Awaiting bureau administration review."
+
+        messages.success(request, msg)
+        return redirect('client_drop')
+
+    user_drops = DroppedFile.objects.filter(user=request.user).select_related('subscriber')[:25]
+    return render(request, 'update/drop.html', {'user_drops': user_drops, 'subscribers': subscribers})
+
+
+@login_required
+@require_POST
+def delete_dropped_file_view(request, drop_id):
+    """Delete a file mistakenly deposited into the drop box."""
+    drop = get_object_or_404(DroppedFile, id=drop_id)
+
+    # Permission check: must be the dropper or staff
+    if drop.user != request.user and not request.user.is_staff:
+        if request.headers.get('x-requested-with') == 'XMLHttpRequest':
+            return JsonResponse({'error': 'You do not have permission to delete this file.'}, status=403)
+        messages.error(request, 'You do not have permission to delete this file.')
+        return redirect('client_drop')
+
+    # Status check: only pending drops can be deleted by non-staff droppers
+    if drop.status != 'pending' and not request.user.is_staff:
+        if request.headers.get('x-requested-with') == 'XMLHttpRequest':
+            return JsonResponse({'error': f'"{drop.original_filename}" has already been imported and cannot be deleted.'}, status=400)
+        messages.error(request, f'"{drop.original_filename}" has already been imported by the bureau administration and cannot be deleted.')
+        return redirect('client_drop')
+
+    filename = drop.original_filename
+    if drop.file:
+        try:
+            drop.file.delete(save=False)
+        except Exception as exc:
+            logger.warning(f"Could not delete dropped file on disk ({drop.file}): {exc}")
+
+    drop.delete()
+
+    if request.headers.get('x-requested-with') == 'XMLHttpRequest':
+        return JsonResponse({
+            'success': True,
+            'message': f'Successfully deleted "{filename}" from the drop box.',
+            'drop_id': drop_id,
+        })
+
+    messages.success(request, f'Successfully deleted "{filename}" from the drop box.')
+    return redirect('client_drop')
+
+
+@login_required
+def pending_drops_api(request):
+    """JSON endpoint for staff to fetch pending dropped files for the Upload staging modal."""
+    if not request.user.is_staff:
+        return JsonResponse({'error': 'Unauthorized'}, status=403)
+
+    try:
+        cleanup_old_dropped_files_task()
+    except Exception as exc:
+        logger.warning(f"Opportunistic dropped file cleanup failed in pending_drops_api: {exc}")
+
+    drops = DroppedFile.objects.filter(status='pending').select_related('user', 'subscriber')
+    data = [
+        {
+            'id': d.id,
+            'filename': d.original_filename,
+            'size_bytes': d.file_size_bytes,
+            'size_formatted': d.formatted_size,
+            'dropped_by': d.user.username,
+            'dropped_at': d.dropped_at.strftime('%b %d, %Y %H:%M'),
+            'subscriber_id': d.subscriber.subscriber_id if d.subscriber else None,
+            'subscriber_name': d.subscriber.subscriber_name if d.subscriber else '',
+            'notes': d.notes or '',
+        }
+        for d in drops
+    ]
+    return JsonResponse({'drops': data})
 
 
 @login_required
 def upload_view(request):
     """Excel file upload page — handles multi-sheet files by splitting into one session per sheet."""
+    # Gate internal droppers: they only access the drop page
+    if is_internal_dropper(request.user) and not request.user.is_staff:
+        return redirect('client_drop')
+
     # Gate: external users must be bound before they can upload
     if _require_bound(request.user):
         return redirect('redeem_token')
@@ -50,263 +195,139 @@ def upload_view(request):
         subscriber = None
         subscribers = get_subscribers_from_batchupdate()  # live from BatchUpdate Sheet1
 
-    if request.method == 'POST' and request.FILES.get('excel_file'):
-        assign_subscriber = request.POST.get('assign_subscriber', 'on')
+    if request.method == 'POST':
+        excel_files = request.FILES.getlist('excel_file') or request.FILES.getlist('file')
 
-        if assign_subscriber == 'on':
-            # Internal users pick a subscriber per upload
-            if not _is_external(request.user):
-                sub_id = request.POST.get('subscriber', '').strip()
+        # Also collect files staged from the Drop Box modal!
+        dropped_file_ids_raw = request.POST.getlist('dropped_file_ids')
+        if not dropped_file_ids_raw and request.POST.get('dropped_file_ids'):
+            dropped_file_ids_raw = [x.strip() for x in request.POST.get('dropped_file_ids').split(',') if x.strip()]
+
+        dropped_objs = []
+        if dropped_file_ids_raw:
+            from django.core.files import File
+            for drop_id in dropped_file_ids_raw:
+                try:
+                    drop_obj = DroppedFile.objects.get(id=int(drop_id), status='pending')
+                    f = File(drop_obj.file.open('rb'), name=drop_obj.original_filename)
+                    excel_files.append(f)
+                    dropped_objs.append(drop_obj)
+                except Exception as e:
+                    logger.warning(f"Could not load dropped file ID {drop_id}: {e}")
+
+        if not excel_files:
+            messages.error(request, 'Please select or stage at least one file to upload.')
+            return redirect('upload')
+
+        upload_to_db = request.POST.get('upload_to_db') == 'on'
+        is_ext = _is_external(request.user)
+        assign_subscriber = is_ext or (request.POST.get('assign_subscriber') == 'on') or bool(subscribers)
+
+        default_subscriber = None
+        if is_ext:
+            default_subscriber = getattr(getattr(request.user, 'subscriber_profile', None), 'subscriber', None)
+        elif assign_subscriber:
+            sub_id = request.POST.get('subscriber', '').strip()
+            if sub_id:
                 try:
                     sub_id_int = int(float(sub_id))
-                except (ValueError, TypeError):
-                    messages.error(request, 'Please select a valid subscriber.')
-                    return redirect('upload')
-                sub_list = subscribers  # reuse already-fetched list
-                sub_match = next((s for s in sub_list if s['subscriber_id'] == sub_id_int), None)
-                if not sub_match:
-                    messages.error(request, 'Please select a valid subscriber.')
-                    return redirect('upload')
-                subscriber, _ = Subscriber.objects.get_or_create(
-                    subscriber_id=sub_id_int,
-                    defaults={'subscriber_name': sub_match['subscriber_name']},
-                )
-
-            if not subscriber:
-                messages.error(request, 'No subscriber assigned. Please contact admin.')
-                return redirect('upload')
-            excel_file = request.FILES['excel_file']
-            excel_password = request.POST.get('excel_password', '').strip() or None
-
-            # Validate file extension
-            if not excel_file.name.endswith(('.xlsx', '.xls', '.xlsb', '.csv')):
-                messages.error(request, 'Please upload an Excel or CSV file (.xlsx, .xls, .xlsb, .csv)')
-                return redirect('upload')
-
-            # P1: Type-aware file size limit
-            # Excel: openpyxl loads ~6x the file size into RAM, so a lower cap is enforced.
-            # CSV: streamed in chunks, so a higher cap is safe.
-            is_csv = excel_file.name.endswith('.csv')
-            is_xlsb = excel_file.name.endswith('.xlsb')
-            max_size_mb = MAX_CSV_FILE_SIZE_MB if is_csv else MAX_EXCEL_FILE_SIZE_MB
-            if excel_file.size > max_size_mb * 1024 * 1024:
-                messages.error(request, f'File too large. Maximum size is {max_size_mb} MB for {"CSV" if is_csv else "Excel"} files.')
-                return redirect('upload')
-
-            # Password decryption: if a password is supplied, decrypt the stream now
-            # so that the saved file on disk is always an unencrypted, readable workbook.
-            file_to_save = excel_file
-            if excel_password and not is_csv:
-                try:
-                    xl = read_excel_file(excel_file, excel_file.name, password=excel_password)
-                    # Re-export the decrypted workbook to a plain BytesIO so downstream
-                    # file-path readers (openpyxl / xlrd) work without a password.
-                    decrypted_buf = BytesIO()
-                    with pd.ExcelWriter(decrypted_buf, engine='openpyxl') as writer:
-                        for sheet in xl.sheet_names:
-                            xl.parse(sheet, dtype=str).to_excel(writer, sheet_name=sheet, index=False)
-                    decrypted_buf.seek(0)
-                    file_to_save = ContentFile(decrypted_buf.read(), name=excel_file.name)
-                except ValueError as exc:
-                    messages.error(request, str(exc))
-                    return redirect('upload')
-
-            # Save the uploaded file temporarily to read sheets
-            temp_session = UploadSession.objects.create(
-                user=request.user,
-                original_file=file_to_save,
-                original_filename=excel_file.name,
-                status='pending_mapping',
-                subscriber=subscriber,
-            )
-            file_path = temp_session.original_file.path
-            
-            # P2: Duplicate detection (check only recent sessions to avoid delay)
-            try:
-                file_hash = calculate_file_hash(file_path)
-                existing = UploadSession.objects.filter(
-                    user=request.user,
-                    status='uploaded'
-                ).exclude(id=temp_session.id).order_by('-uploaded_at')[:5]
-                
-                for existing_session in existing:
-                    if existing_session.original_file and os.path.exists(existing_session.original_file.path):
-                        existing_hash = calculate_file_hash(existing_session.original_file.path)
-                        if file_hash == existing_hash:
-                            messages.warning(
-                                request,
-                                f'This file appears to be a duplicate of "{existing_session.original_filename}" uploaded on {existing_session.uploaded_at.strftime("%Y-%m-%d")}. Proceeding anyway.'
-                            )
-                            break
-            except Exception:
-                logger.warning("Duplicate detection failed", exc_info=True)
-            
-            # Detect sheets — clean up temp session if the file cannot be read
-            try:
-                sheet_names = get_excel_sheet_names(file_path)
-            except Exception as exc:
-                logger.error(f"Could not read sheets from uploaded file: {exc}", exc_info=True)
-                try:
-                    temp_session.original_file.delete(save=False)
-                    temp_session.delete()
-                except Exception:
-                    pass
-                messages.error(request, 'Could not read the uploaded file. Please ensure it is a valid Excel or CSV file.')
-                return redirect('upload')
-            
-            if sheet_names is None or len(sheet_names) <= 1:
-                # Single sheet or CSV — use the temp session directly
-                name_override = None
-                try:
-                    fname_no_ext = os.path.splitext(excel_file.name)[0]
-                    _, parsed_name = _resolve_subscriber_from_name(fname_no_ext)
-                    if parsed_name and parsed_name != fname_no_ext:
-                        name_override = parsed_name
-                except Exception:
-                    pass
-
-                sheet_name = build_sheet_name(subscriber, name_override=name_override)
-                temp_session.sheet_name = sheet_name
-                temp_session.save()
-
-                # Generate SQL script and upload to BatchUpdate
-                _process_sheet_upload(temp_session, file_path, sheet_name)
-                
-                # Detect header row then read with it
-                first_session = temp_session
-                try:
-                    template_signatures = list(
-                        MappingTemplate.objects.filter(user=request.user)
-                        .values_list('header_signature', flat=True)
-                    )
-                    hrow = detect_header_row(file_path, template_signatures=template_signatures)
-                    first_session.header_row = hrow
-                    first_session.save()
-                    df = read_uploaded_file(file_path, header=hrow, nrows=0)  # headers only — data loaded in task
-                    _try_auto_map(request, first_session, df)
-                    if first_session.mappings.exists():
-                        return redirect('process', session_id=first_session.id)
-                except Exception:
-                    logger.warning(f"Header detection / auto-map failed for session {first_session.id}", exc_info=True)
-                
-                return redirect('mapping', session_id=first_session.id)
-            
-            else:
-                # Multi-sheet Excel — split into one session per sheet
-                # Delete the temp session, we'll create individual ones
-                temp_session.delete()
-
-                batch_id = uuid.uuid4()
-                created_sessions = []
-                template_signatures = list(
-                    MappingTemplate.objects.filter(user=request.user)
-                    .values_list('header_signature', flat=True)
-                )
-                # Rename source file to prevent overwrite during sheet extraction
-                # (build_sheet_name can produce a name matching the original filename).
-                src_read_path = file_path + '.multisheet_src'
-                shutil.copy2(file_path, src_read_path)
-
-                try:
-                    for sheet_index, sname in enumerate(sheet_names, start=1):
-                        try:
-                            hrow = detect_header_row(src_read_path, sheet_name=sname, template_signatures=template_signatures)
-                            df = read_uploaded_file_sheet(src_read_path, sheet_name=sname, header=hrow)
-                        except Exception as e:
-                            messages.warning(request, f'Could not read sheet "{sname}": {e}')
-                            continue
-
-                        sheet_name_override = None
-                        try:
-                            _, parsed_name = _resolve_subscriber_from_name(sname)
-                            if parsed_name and parsed_name != sname:
-                                sheet_name_override = parsed_name
-                        except Exception:
-                            pass
-
-                        sheet_name = build_sheet_name(subscriber, index=sheet_index if sheet_index > 1 else None, name_override=sheet_name_override)
-                        sheet_filename = f"{sheet_name}.xlsx"
-                        sheet_dir = os.path.join('media', 'uploads')
-                        os.makedirs(sheet_dir, exist_ok=True)
-                        sheet_path = os.path.join(sheet_dir, sheet_filename)
-                        df.to_excel(sheet_path, index=False, engine='openpyxl')
-
-                        # df was read with header=hrow, so when saved via to_excel the
-                        # resulting file always has headers at row 0 (pre-header rows are dropped).
-                        session = UploadSession.objects.create(
-                            user=request.user,
-                            original_file=f'uploads/{sheet_filename}',
-                            original_filename=sname,
-                            status='pending_mapping',
-                            sheet_name=sheet_name,
-                            batch_id=batch_id,
-                            source_filename=excel_file.name,
-                            header_row=0,
-                            subscriber=subscriber,
+                    sub_list = subscribers if subscribers is not None else get_subscribers_from_batchupdate()
+                    sub_match = next((s for s in sub_list if s['subscriber_id'] == sub_id_int), None)
+                    if sub_match:
+                        default_subscriber, _ = Subscriber.objects.get_or_create(
+                            subscriber_id=sub_id_int,
+                            defaults={'subscriber_name': sub_match['subscriber_name']},
                         )
+                except (ValueError, TypeError):
+                    pass
 
-                        _process_sheet_upload(session, sheet_path, sheet_name, df=df)
+        # Collect per-file passwords: excel_password_0, excel_password_1, … or drop_password_<id>
+        num_local = len(excel_files) - len(dropped_objs)
+        file_passwords = []
+        for i in range(len(excel_files)):
+            pwd_val = (request.POST.get(f'excel_password_{i}', '') or '').strip() or None
+            if not pwd_val and i >= num_local:
+                drop_idx = i - num_local
+                if drop_idx < len(dropped_objs):
+                    pwd_val = (request.POST.get(f'drop_password_{dropped_objs[drop_idx].id}', '') or '').strip() or None
+            file_passwords.append(pwd_val)
 
-                        try:
-                            _try_auto_map(request, session, df)
-                            if session.mappings.filter(target_column__isnull=False).exclude(target_column='').exists():
-                                session.status = 'processing'
-                                session.save()
-                                async_task('update.tasks.process_file_task', session.id)
-                        except Exception:
-                            logger.warning(f"Auto-map failed for session {session.id}", exc_info=True)
+        if all(p is None for p in file_passwords):
+            shared = (request.POST.get('excel_password', '') or '').strip() or None
+            file_passwords = [shared] * len(excel_files)
 
-                        created_sessions.append(session)
-                finally:
-                    try:
-                        os.remove(src_read_path)
-                    except OSError:
-                        pass
+        # Collect per-file subscribers: file_subscriber_0, file_subscriber_1, … or drop_subscriber_<id>
+        file_subscribers = []
+        for i in range(len(excel_files)):
+            sub_val = (request.POST.get(f'file_subscriber_{i}', '') or '').strip() or None
+            if not sub_val and i >= num_local:
+                drop_idx = i - num_local
+                if drop_idx < len(dropped_objs):
+                    sub_val = (request.POST.get(f'drop_subscriber_{dropped_objs[drop_idx].id}', '') or '').strip() or None
+            file_subscribers.append(sub_val)
 
-                if not created_sessions:
-                    messages.error(request, 'No sheets could be read from the file.')
-                    return redirect('upload')
+        template_signatures = list(
+            MappingTemplate.objects.filter(user=request.user)
+            .values_list('header_signature', flat=True)
+        )
 
-                return redirect('batch', batch_id=batch_id)
+        resp = _handle_free_upload(
+            request,
+            excel_files,
+            template_signatures,
+            file_passwords=file_passwords,
+            file_subscribers=file_subscribers,
+            default_subscriber=default_subscriber,
+        )
 
-        else:
-            # Free upload mode (admin only) — subscriber resolved from filename/sheet tab name
-            excel_files = request.FILES.getlist('excel_file')
-            # Collect per-file passwords: excel_password_0, excel_password_1, …
-            # A single-file free-upload also accepts the plain excel_password name.
-            file_passwords = [
-                (request.POST.get(f'excel_password_{i}', '') or '').strip() or None
-                for i in range(len(excel_files))
-            ]
-            if all(p is None for p in file_passwords):
-                # fallback: single shared field from assigned-subscriber form
-                shared = (request.POST.get('excel_password', '') or '').strip() or None
-                file_passwords = [shared] * len(excel_files)
-            template_signatures = list(
-                MappingTemplate.objects.filter(user=request.user)
-                .values_list('header_signature', flat=True)
-            )
-            return _handle_free_upload(request, excel_files, template_signatures, file_passwords)
+        # Mark imported dropped files as completed
+        for drop_obj in dropped_objs:
+            try:
+                drop_obj.status = 'imported'
+                drop_obj.imported_by = request.user
+                drop_obj.imported_at = timezone.now()
+                drop_obj.save(update_fields=['status', 'imported_by', 'imported_at'])
+            except Exception as e:
+                logger.warning(f"Failed to update status for dropped file {drop_obj.id}: {e}")
+
+        return resp
     
     # Aggregate stats from ALL user sessions (not just displayed rows)
     all_user_sessions = UploadSession.objects.filter(user=request.user)
     total_count = all_user_sessions.count()
     uploaded_count = all_user_sessions.filter(status='uploaded').count()
     processed_count = all_user_sessions.filter(status='processed').count()
-    pending_count = all_user_sessions.filter(status__in=['pending_mapping', 'processing']).count()
+    pending_count = all_user_sessions.filter(status__in=['pending_mapping', 'processing', 'uploading_to_db']).count()
     error_count = all_user_sessions.filter(status='error').count()
 
-    # Group batch uploads: show one row per batch_id, individual rows for single uploads.
+    from django.db.models import Sum
+    total_rows_cleaned = all_user_sessions.filter(status__in=['uploaded', 'processed']).aggregate(total=Sum('rows_processed'))['total'] or 0
+
+    # Fetch all errored sessions for the Error Resolution Modal
+    error_sessions = list(all_user_sessions.filter(status='error').select_related('subscriber').order_by('-uploaded_at')[:50])
+
+    # Group batch uploads: show one row per batch_id, compute accurate composite status for each batch.
     # Cap at 10 entries for the recent-uploads table.
-    _all = all_user_sessions.select_related('subscriber').order_by('-uploaded_at')[:60]
-    seen_batches = set()
+    _all = all_user_sessions.select_related('subscriber').order_by('-uploaded_at')[:100]
+    seen_batches = {}
     sessions = []
     for s in _all:
         if s.batch_id:
             if s.batch_id not in seen_batches:
-                seen_batches.add(s.batch_id)
+                batch_sessions = list(all_user_sessions.filter(batch_id=s.batch_id))
+                has_error = any(bs.status == 'error' for bs in batch_sessions)
+                has_pending = any(bs.status in ['pending_mapping', 'processing', 'uploading_to_db'] for bs in batch_sessions)
+                if has_error:
+                    s.display_status = 'error'
+                elif has_pending:
+                    s.display_status = 'pending'
+                else:
+                    s.display_status = 'uploaded'
+                s.sheet_count = len(batch_sessions)
+                seen_batches[s.batch_id] = s
                 sessions.append(s)
         else:
+            s.display_status = 'pending' if s.status in ['pending_mapping', 'processing', 'uploading_to_db'] else ('error' if s.status == 'error' else 'uploaded')
             sessions.append(s)
         if len(sessions) >= 10:
             break
@@ -322,6 +343,8 @@ def upload_view(request):
         'uploaded_count': uploaded_count + processed_count,
         'pending_count': pending_count,
         'error_count': error_count,
+        'total_rows_cleaned': total_rows_cleaned,
+        'error_sessions': error_sessions,
     })
 
 
@@ -345,29 +368,37 @@ def _resolve_subscriber_from_name(name_str):
         sub_id_int = int(parts[0])
     except (ValueError, IndexError):
         raise ValueError(f'Could not parse subscriber ID from "{name_str}"')
-    # Name is everything after the date segment (index 2 onward)
-    sub_name = '_'.join(parts[2:]) if len(parts) >= 3 else name_str
-    return sub_id_int, sub_name
+    
+    # If there are at least 3 parts, the second part is the date segment
+    # e.g., 446_15072026_gtb -> sub_id = 446, date = "15072026", name = "gtb"
+    if len(parts) >= 3:
+        sub_date = parts[1]
+        sub_name = '_'.join(parts[2:])
+    else:
+        sub_date = None
+        sub_name = name_str
+        
+    return sub_id_int, sub_name, sub_date
 
 
-def _handle_free_upload(request, excel_files, template_signatures, file_passwords=None):
+def _handle_free_upload(request, excel_files, template_signatures, file_passwords=None, file_subscribers=None, default_subscriber=None):
     """
-    Free upload mode (toggle OFF, admin only).
-    Filename-driven mode (multiple files, or single file with matching filename)
-    → subscriber parsed from filename.
-    Multisheet fallback mode (single file with non-matching filename)
-    → subscriber parsed from sheet tab names.
-
-    file_passwords: list of passwords (or None) aligned by index to excel_files.
+    Unified file upload handler for both single and multi-file uploads.
+    Supports:
+    - Per-file subscriber assignment (via file_subscribers list)
+    - Default assigned subscriber (from top toggle or user profile)
+    - Auto-detection from filename pattern (subid_ddmmyyyy_name)
+    - Multisheet fallback mode if single file with non-matching filename
     """
     batch_id = uuid.uuid4()
     created_sessions = []
     max_excel_size = MAX_EXCEL_FILE_SIZE_MB * 1024 * 1024
     max_csv_size = MAX_CSV_FILE_SIZE_MB * 1024 * 1024
+    upload_to_db = request.POST.get('upload_to_db') == 'on'
 
-    # Unify parsing logic: use filename-driven mode if uploading multiple files OR if a single file matches the filename pattern
-    use_filename_driven = len(excel_files) > 1
-    if len(excel_files) == 1:
+    # Unify parsing logic: use assigned/filename mode if multiple files, or if subscriber is provided, or if filename matches pattern
+    use_filename_driven = len(excel_files) > 1 or (file_subscribers and any(file_subscribers)) or (default_subscriber is not None)
+    if not use_filename_driven and len(excel_files) == 1:
         try:
             _resolve_subscriber_from_name(os.path.splitext(excel_files[0].name)[0])
             use_filename_driven = True
@@ -375,32 +406,64 @@ def _handle_free_upload(request, excel_files, template_signatures, file_password
             pass
 
     if use_filename_driven:
-        # ── Multi-Excel mode ──────────────────────────────────────────────────
+        # ── Multi-file / Assigned Subscriber mode ─────────────────────────────
+        has_specific_message = False
         for idx, f in enumerate(excel_files):
-            sheet_name = os.path.splitext(f.name)[0]
-            try:
-                sub_id_int, sub_name = _resolve_subscriber_from_name(sheet_name)
-            except ValueError:
-                messages.warning(request, f'Skipping "{f.name}": filename does not match expected pattern (subid_ddmmyyyy_name).')
+            # 1. Resolve subscriber ID: per-file dropdown > default assigned > filename pattern
+            target_sub_id = None
+            if file_subscribers and idx < len(file_subscribers) and file_subscribers[idx]:
+                try:
+                    target_sub_id = int(float(file_subscribers[idx]))
+                except (ValueError, TypeError):
+                    target_sub_id = None
+
+            if target_sub_id is None and default_subscriber:
+                target_sub_id = default_subscriber.subscriber_id
+
+            sub_name = None
+            sub_date = None
+            if target_sub_id is None:
+                try:
+                    target_sub_id, sub_name, sub_date = _resolve_subscriber_from_name(os.path.splitext(f.name)[0])
+                except ValueError:
+                    pass
+
+            if target_sub_id is None:
+                has_specific_message = True
+                messages.warning(request, f'Skipping "{f.name}": please assign a subscriber for this file.')
                 continue
 
+            # Validate extension
+            if not f.name.endswith(('.xlsx', '.xls', '.xlsb', '.csv')):
+                has_specific_message = True
+                messages.warning(request, f'Skipping "{f.name}": must be .xlsx, .xls, .xlsb, or .csv.')
+                continue
+
+            is_csv = f.name.endswith('.csv')
             is_xlsb_file = f.name.endswith('.xlsb')
-            if f.size > max_excel_size:
-                messages.warning(request, f'Skipping "{f.name}": file too large (max {MAX_EXCEL_FILE_SIZE_MB} MB).')
-                continue
-            if not f.name.endswith(('.xlsx', '.xls', '.xlsb')):
-                messages.warning(request, f'Skipping "{f.name}": must be .xlsx, .xls, or .xlsb in multi-file mode.')
+            limit_bytes = max_csv_size if is_csv else max_excel_size
+            limit_mb = MAX_CSV_FILE_SIZE_MB if is_csv else MAX_EXCEL_FILE_SIZE_MB
+            if f.size > limit_bytes:
+                has_specific_message = True
+                messages.warning(request, f'Skipping "{f.name}": file too large (max {limit_mb} MB).')
                 continue
 
-            subscriber, _ = Subscriber.objects.get_or_create(
-                subscriber_id=sub_id_int,
-                defaults={'subscriber_name': sub_name},
-            )
+            subscriber = Subscriber.objects.filter(subscriber_id=target_sub_id).first()
+            if not subscriber:
+                sub_list = get_subscribers_from_batchupdate()
+                sub_match = next((s for s in sub_list if s['subscriber_id'] == target_sub_id), None)
+                sname = sub_match['subscriber_name'] if sub_match else (sub_name or f'Subscriber {target_sub_id}')
+                subscriber, _ = Subscriber.objects.get_or_create(
+                    subscriber_id=target_sub_id,
+                    defaults={'subscriber_name': sname},
+                )
 
-            # Decrypt if a password was supplied for this file
+            sheet_name = build_sheet_name(subscriber, date=sub_date)
+
+            # Decrypt if a password was supplied for this file (Excel only)
             password = (file_passwords[idx] if file_passwords and idx < len(file_passwords) else None)
             file_to_save = f
-            if password:
+            if password and not is_csv:
                 try:
                     xl = read_excel_file(f, f.name, password=password)
                     decrypted_buf = BytesIO()
@@ -410,6 +473,7 @@ def _handle_free_upload(request, excel_files, template_signatures, file_password
                     decrypted_buf.seek(0)
                     file_to_save = ContentFile(decrypted_buf.read(), name=f.name)
                 except ValueError as exc:
+                    has_specific_message = True
                     messages.warning(request, f'Skipping "{f.name}": {exc}')
                     continue
 
@@ -422,13 +486,43 @@ def _handle_free_upload(request, excel_files, template_signatures, file_password
                 batch_id=batch_id,
                 source_filename=f.name,
                 subscriber=subscriber,
+                upload_to_db=upload_to_db,
             )
             file_path = session.original_file.path
+
+            # Duplicate detection (check against previous non-error sessions)
+            is_duplicate = False
+            try:
+                file_hash = calculate_file_hash(file_path)
+                existing = UploadSession.objects.filter(
+                    user=request.user
+                ).exclude(batch_id=batch_id).exclude(id=session.id).exclude(status='error').order_by('-uploaded_at')[:50]
+                for existing_session in existing:
+                    if existing_session.original_file and os.path.exists(existing_session.original_file.path):
+                        if file_hash == calculate_file_hash(existing_session.original_file.path):
+                            is_duplicate = True
+                            break
+            except Exception:
+                logger.warning("Duplicate detection failed", exc_info=True)
+
+            if is_duplicate:
+                has_specific_message = True
+                try:
+                    session.original_file.delete(save=False)
+                    session.delete()
+                except Exception:
+                    pass
+                messages.error(
+                    request,
+                    f'Upload blocked: "{f.name}" has already been uploaded previously. Kindly check the filename and re-upload.'
+                )
+                continue
 
             # Detect sheets
             try:
                 sheet_names = get_excel_sheet_names(file_path)
             except Exception as exc:
+                has_specific_message = True
                 logger.error(f"Could not read sheets from uploaded file: {exc}", exc_info=True)
                 try:
                     session.original_file.delete(save=False)
@@ -457,15 +551,31 @@ def _handle_free_upload(request, excel_files, template_signatures, file_password
                             messages.warning(request, f'Could not read sheet "{sname}" from "{f.name}": {e}')
                             continue
 
+                        if not is_sheet_usable(df, template_signatures=template_signatures):
+                            logger.info(f"Skipping unusable sheet '{sname}' in '{f.name}'")
+                            messages.info(request, f'Skipped sheet "{sname}" from "{f.name}": empty or no recognized column headers.')
+                            continue
+
                         sheet_name_override = None
+                        sheet_date = sub_date
                         try:
-                            _, parsed_name = _resolve_subscriber_from_name(sname)
+                            _, parsed_name, parsed_date = _resolve_subscriber_from_name(sname)
                             if parsed_name and parsed_name != sname:
                                 sheet_name_override = parsed_name
+                            if parsed_date:
+                                sheet_date = parsed_date
                         except Exception:
                             pass
 
-                        sheet_name = build_sheet_name(subscriber, index=sheet_index if sheet_index > 1 else None, name_override=sheet_name_override)
+                        if not sheet_name_override:
+                            sheet_name_override = sub_name
+
+                        sheet_name = build_sheet_name(
+                            subscriber,
+                            date=sheet_date,
+                            index=sheet_index - 1 if sheet_index > 1 else None,
+                            name_override=sheet_name_override
+                        )
                         sheet_filename = f"{sheet_name}.xlsx"
                         sheet_dir = os.path.join('media', 'uploads')
                         os.makedirs(sheet_dir, exist_ok=True)
@@ -482,16 +592,21 @@ def _handle_free_upload(request, excel_files, template_signatures, file_password
                             source_filename=f.name,
                             header_row=0,
                             subscriber=subscriber,
+                            upload_to_db=upload_to_db,
                         )
 
                         _process_sheet_upload(sheet_session, sheet_path, sheet_name, df=df)
 
                         try:
-                            _try_auto_map(request, sheet_session, df)
-                            if sheet_session.mappings.filter(target_column__isnull=False).exclude(target_column='').exists():
+                            auto_map_res = _try_auto_map(request, sheet_session, df)
+                            if auto_map_res.get('is_complete'):
                                 sheet_session.status = 'processing'
                                 sheet_session.save()
                                 async_task('update.tasks.process_file_task', sheet_session.id)
+                            else:
+                                sheet_session.status = 'pending_mapping'
+                                sheet_session.save()
+                                _flash_auto_map_warning(request, sheet_session, auto_map_res, sheet_name=sname)
                         except Exception:
                             logger.warning(f"Auto-map failed for session {sheet_session.id}", exc_info=True)
 
@@ -504,17 +619,6 @@ def _handle_free_upload(request, excel_files, template_signatures, file_password
 
             else:
                 # Single sheet or CSV — use the created session directly
-                # Duplicate detection
-                try:
-                    file_hash = calculate_file_hash(file_path)
-                    for existing_session in UploadSession.objects.filter(user=request.user, status='uploaded').exclude(id=session.id).order_by('-uploaded_at')[:5]:
-                        if existing_session.original_file and os.path.exists(existing_session.original_file.path):
-                            if file_hash == calculate_file_hash(existing_session.original_file.path):
-                                messages.warning(request, f'"{f.name}" appears to be a duplicate of "{existing_session.original_filename}". Proceeding anyway.')
-                                break
-                except Exception:
-                    logger.warning("Duplicate detection failed", exc_info=True)
-
                 _process_sheet_upload(session, file_path, sheet_name)
 
                 try:
@@ -522,30 +626,35 @@ def _handle_free_upload(request, excel_files, template_signatures, file_password
                     session.header_row = hrow
                     session.save()
                     df = read_uploaded_file(file_path, header=hrow, nrows=0)  # headers only — data loaded in task
-                    _try_auto_map(request, session, df)
-                    if session.mappings.filter(target_column__isnull=False).exclude(target_column='').exists():
+                    auto_map_res = _try_auto_map(request, session, df)
+                    if auto_map_res.get('is_complete'):
                         session.status = 'processing'
                         session.save()
                         async_task('update.tasks.process_file_task', session.id)
+                    else:
+                        session.status = 'pending_mapping'
+                        session.save()
+                        _flash_auto_map_warning(request, session, auto_map_res)
                 except Exception:
                     logger.warning(f"Header detection / auto-map failed for session {session.id}", exc_info=True)
                 created_sessions.append(session)
 
         if not created_sessions:
             logger.warning(
-                "Free upload: no files processed — filenames failed pattern check",
+                "Free upload: no files processed",
                 extra={'user': request.user.username},
             )
-            messages.error(request, 'No files could be processed. Check that filenames follow the pattern: subid_ddmmyyyy_name.xlsx')
+            if not has_specific_message:
+                messages.error(request, 'No files could be processed. Please check your uploaded files.')
             return redirect('upload')
 
         if len(created_sessions) > 1:
-            return redirect('batch', batch_id=batch_id)
+            return redirect(f"{reverse('batch', kwargs={'batch_id': batch_id})}?new_upload=1")
         else:
             session = created_sessions[0]
-            if session.mappings.filter(target_column__isnull=False).exclude(target_column='').exists():
+            if session.status == 'processing':
                 return redirect('process', session_id=session.id)
-            return redirect('mapping', session_id=session.id)
+            return redirect(f"{reverse('mapping', kwargs={'session_id': session.id})}?needs_mapping=1")
 
     else:
         # ── Single-file multisheet mode ────────────────────────────────────────
@@ -601,7 +710,7 @@ def _handle_free_upload(request, excel_files, template_signatures, file_password
             # Single sheet — subscriber from filename
             sheet_name = os.path.splitext(f.name)[0]
             try:
-                sub_id_int, sub_name = _resolve_subscriber_from_name(sheet_name)
+                sub_id_int, sub_name, sub_date = _resolve_subscriber_from_name(sheet_name)
             except ValueError:
                 temp_session.delete()
                 messages.error(request, 'Filename does not match the expected pattern (subid_ddmmyyyy_name).')
@@ -631,13 +740,20 @@ def _handle_free_upload(request, excel_files, template_signatures, file_password
                 temp_session.header_row = hrow
                 temp_session.save()
                 df = read_uploaded_file(file_path, header=hrow)
-                _try_auto_map(request, temp_session, df)
-                if temp_session.mappings.exists():
+                auto_map_res = _try_auto_map(request, temp_session, df)
+                if auto_map_res.get('is_complete'):
+                    temp_session.status = 'processing'
+                    temp_session.save()
+                    async_task('update.tasks.process_file_task', temp_session.id)
                     return redirect('process', session_id=temp_session.id)
+                else:
+                    temp_session.status = 'pending_mapping'
+                    temp_session.save()
+                    _flash_auto_map_warning(request, temp_session, auto_map_res)
             except Exception:
                 logger.warning(f"Header detection / auto-map failed for session {temp_session.id}", exc_info=True)
 
-            return redirect('mapping', session_id=temp_session.id)
+            return redirect(f"{reverse('mapping', kwargs={'session_id': temp_session.id})}?needs_mapping=1")
 
         else:
             # Multisheet — subscriber from each sheet tab name
@@ -645,7 +761,7 @@ def _handle_free_upload(request, excel_files, template_signatures, file_password
 
             for sname in sheet_names:
                 try:
-                    sub_id_int, sub_name = _resolve_subscriber_from_name(sname)
+                    sub_id_int, sub_name, sub_date = _resolve_subscriber_from_name(sname)
                 except ValueError:
                     messages.warning(request, f'Skipping sheet "{sname}": tab name does not match expected pattern (subid_ddmmyyyy_name).')
                     continue
@@ -655,6 +771,11 @@ def _handle_free_upload(request, excel_files, template_signatures, file_password
                     df = read_uploaded_file_sheet(file_path, sheet_name=sname, header=hrow)
                 except Exception as e:
                     messages.warning(request, f'Could not read sheet "{sname}": {e}')
+                    continue
+
+                if not is_sheet_usable(df, template_signatures=template_signatures):
+                    logger.info(f"Skipping unusable sheet '{sname}' in '{f.name}'")
+                    messages.info(request, f'Skipped sheet "{sname}": empty or no recognized column headers.')
                     continue
 
                 subscriber, _ = Subscriber.objects.get_or_create(
@@ -683,11 +804,15 @@ def _handle_free_upload(request, excel_files, template_signatures, file_password
                 _process_sheet_upload(session, sheet_path, sname, df=df)
 
                 try:
-                    _try_auto_map(request, session, df)
-                    if session.mappings.filter(target_column__isnull=False).exclude(target_column='').exists():
+                    auto_map_res = _try_auto_map(request, session, df)
+                    if auto_map_res.get('is_complete'):
                         session.status = 'processing'
                         session.save()
                         async_task('update.tasks.process_file_task', session.id)
+                    else:
+                        session.status = 'pending_mapping'
+                        session.save()
+                        _flash_auto_map_warning(request, session, auto_map_res, sheet_name=sname)
                 except Exception:
                     logger.warning(f"Auto-map failed for session {session.id}", exc_info=True)
 
@@ -697,35 +822,70 @@ def _handle_free_upload(request, excel_files, template_signatures, file_password
                 messages.error(request, 'No sheets could be processed. Check that sheet tab names follow the pattern: subid_ddmmyyyy_name')
                 return redirect('upload')
 
-            return redirect('batch', batch_id=batch_id)
+            return redirect(f"{reverse('batch', kwargs={'batch_id': batch_id})}?new_upload=1")
+
+
+def _flash_auto_map_warning(request, session, auto_map_res, sheet_name=None):
+    """Display user-friendly flash message explaining why auto-processing was halted."""
+    label = f"sheet '{sheet_name}'" if sheet_name else f"'{session.original_filename}'"
+    sub_label = f"by {session.subscriber}" if session.subscriber else "for this subscriber"
+    if auto_map_res.get('missing_historical_targets'):
+        missing_names = [DISPLAY_HEADERS.get(t, t) for t in auto_map_res['missing_historical_targets']]
+        messages.warning(
+            request,
+            f"Column(s) previously provided {sub_label} were not recognized in {label}: "
+            f"{', '.join(missing_names)}. Please verify column mapping before processing."
+        )
+    elif not auto_map_res.get('has_acct'):
+        messages.warning(
+            request,
+            f"Account Number column could not be auto-detected in {label}. Please map Account Number."
+        )
+    elif not auto_map_res.get('is_complete'):
+        messages.info(
+            request,
+            f"First-time upload for {session.subscriber or 'subscriber'}: please review and confirm column mappings."
+        )
 
 
 def _try_auto_map(request, session, df):
-    """Try to auto-apply a saved mapping template, with subscriber-based fallback."""
+    """
+    Try to auto-apply a saved mapping template, with subscriber-based fallback
+    and historical target column completeness verification.
+    
+    Returns:
+        dict: {
+            'is_complete': bool,
+            'missing_historical_targets': list,
+            'resolved_mappings': dict,
+            'has_acct': bool,
+            'historical_targets': list,
+        }
+    """
     headers = sorted(list(df.columns))
     header_signature = json.dumps(headers)
+    
+    resolved_mappings = {}
+    applied_stage = None
 
     # 1. Exact header match via saved MappingTemplate (fastest path)
-    template = MappingTemplate.objects.filter(
-        user=request.user,
-        header_signature=header_signature
-    ).first()
+    # Match in Python to avoid SQL Server NTEXT/NVARCHAR equality error (pyodbc 42000/402)
+    template = next(
+        (t for t in MappingTemplate.objects.filter(user=request.user)
+         if t.header_signature == header_signature),
+        None,
+    )
 
     if template:
-        for header, target in template.mappings.items():
-            ColumnMapping.objects.create(
-                session=session,
-                original_header=header,
-                target_column=target
-            )
+        applied_stage = "Stage 1 (Exact template match)"
+        resolved_mappings = {h: t for h, t in template.mappings.items() if t}
         template.use_count += 1
         template.save()
-        return
 
     # 2. Subscriber-based fallback: reuse mapping from a previous session for the same subscriber.
     #    This means re-uploads for the same subscriber never require manual re-mapping as long as
     #    the column structure is unchanged — even across different users or upload dates.
-    if session.subscriber_id:
+    if not resolved_mappings and session.subscriber_id:
         prev_sessions = (
             UploadSession.objects
             .filter(subscriber_id=session.subscriber_id)
@@ -743,61 +903,110 @@ def _try_auto_map(request, session, df):
                 continue
             # Build a dict of only the columns that were actually mapped
             prev_map = {m.original_header: m.target_column for m in prev_mapping_objs if m.target_column}
-            if not prev_map:
-                continue
-            # Apply the previous mappings to the new session
-            for header, target in prev_map.items():
-                ColumnMapping.objects.create(
-                    session=session,
-                    original_header=header,
-                    target_column=target,
-                )
-            # Promote to a MappingTemplate so the next upload takes the fast path
-            MappingTemplate.objects.update_or_create(
-                user=request.user,
-                header_signature=header_signature,
-                defaults={
-                    'name': f"Auto: {session.subscriber} ({session.original_filename[:25]})",
-                    'mappings': prev_map,
-                },
-            )
-            return
+            if prev_map:
+                resolved_mappings = prev_map
+                applied_stage = f"Stage 2 (Subscriber fallback from Session {prev.id})"
+                break
 
-    # 3. Heuristic dictionary fallback: match column headers against dictionary synonyms
-    mappings_dict = {}
+    # 3. Always apply heuristic dictionary fallback to any columns that remain unmapped.
+    #    This catches newly added or previously skipped required columns like CurrentBalanceAmt.
+    mapped_targets = set(resolved_mappings.values())
+    heuristic_mappings = {}
     for header in df.columns:
+        if header in resolved_mappings:
+            continue
         cleaned_header = str(header).strip().lower()
         matched_target = None
         for target_col, synonyms in HEADER_MAPPING_DICTIONARY.items():
+            if target_col in mapped_targets:
+                continue  # Prevent mapping multiple headers to the same target column
             if cleaned_header in synonyms:
                 matched_target = target_col
                 break
         if matched_target:
-            mappings_dict[header] = matched_target
+            resolved_mappings[header] = matched_target
+            mapped_targets.add(matched_target)
+            heuristic_mappings[header] = matched_target
 
-    # If we mapped at least one target column, save these mappings and cache the template
-    if mappings_dict:
-        for header, target in mappings_dict.items():
+    # ── Historical Target Completeness Verification ──
+    current_mapped_targets = set(resolved_mappings.values())
+    has_acct = 'account_number' in current_mapped_targets
+
+    historical_targets = set()
+    missing_historical_targets = set()
+    if session.subscriber_id:
+        historical_targets = get_subscriber_historical_targets(
+            session.subscriber_id, exclude_session_id=session.id
+        )
+        if historical_targets:
+            missing_historical_targets = historical_targets - current_mapped_targets
+
+    if historical_targets:
+        # Known subscriber: must have Account Number AND all historically provided targets
+        is_complete = has_acct and (len(missing_historical_targets) == 0)
+    else:
+        # First-time subscriber: must have Account Number, at least one other target,
+        # AND no unmapped columns in the file (if file has unmapped columns, prompt confirmation)
+        unmapped_headers = [c for c in df.columns if c not in resolved_mappings]
+        is_complete = has_acct and len(current_mapped_targets) >= 2 and (len(unmapped_headers) == 0)
+
+    # Create ColumnMapping objects for all mapped columns so UI displays them
+    if resolved_mappings:
+        session.mappings.all().delete()
+        
+        if applied_stage:
+            if heuristic_mappings:
+                logger.info(f"[Session {session.id}] Auto-mapped via {applied_stage}, and heuristic matched remaining: {heuristic_mappings}. Mappings: {resolved_mappings}")
+            else:
+                logger.info(f"[Session {session.id}] Auto-mapped via {applied_stage}. Mappings: {resolved_mappings}")
+        else:
+            logger.info(f"[Session {session.id}] Auto-mapped via Stage 3 (Heuristic dictionary). Mappings: {resolved_mappings}")
+
+        for header, target in resolved_mappings.items():
             ColumnMapping.objects.create(
                 session=session,
                 original_header=header,
                 target_column=target,
             )
         
-        # Save as a MappingTemplate so subsequent uploads of this file structure take the fast Stage 1 path
-        name = (
-            f"Auto Dict: {session.subscriber} ({session.original_filename[:25]})"
-            if session.subscriber_id
-            else f"Auto Dict from {session.original_filename[:30]}"
-        )
-        MappingTemplate.objects.update_or_create(
-            user=request.user,
-            header_signature=header_signature,
-            defaults={
-                'name': name,
-                'mappings': mappings_dict,
-            },
-        )
+        # Save as a MappingTemplate ONLY if mapping is fully complete!
+        # Do not save incomplete mappings where historical columns are missing.
+        if is_complete:
+            name = (
+                f"Auto Dict: {session.subscriber} ({session.original_filename[:25]})"
+                if session.subscriber_id
+                else f"Auto Dict from {session.original_filename[:30]}"
+            )
+            existing_tpl = next(
+                (t for t in MappingTemplate.objects.filter(user=request.user)
+                 if t.header_signature == header_signature),
+                None,
+            )
+            if existing_tpl:
+                existing_tpl.name = name
+                existing_tpl.mappings = resolved_mappings
+                existing_tpl.save()
+            else:
+                MappingTemplate.objects.create(
+                    user=request.user,
+                    header_signature=header_signature,
+                    name=name,
+                    mappings=resolved_mappings,
+                )
+        else:
+            logger.info(
+                f"[Session {session.id}] Incomplete auto-map: missing historical targets={missing_historical_targets}. "
+                f"Halting auto-processing and withholding template save."
+            )
+
+    return {
+        'is_complete': is_complete,
+        'missing_historical_targets': list(missing_historical_targets),
+        'resolved_mappings': resolved_mappings,
+        'has_acct': has_acct,
+        'historical_targets': list(historical_targets),
+    }
+
 
 
 @login_required
@@ -828,6 +1037,16 @@ def mapping_view(request, session_id):
             )
             if target:
                 mappings_dict[header] = target
+
+        # Enforce that Account Number is mapped
+        if 'account_number' not in mappings_dict.values():
+            messages.error(request, 'Account Number column is required. Please select which column contains Account Numbers.')
+            return render(request, 'update/mapping.html', {
+                'session': session,
+                'headers': headers,
+                'target_columns': target_columns,
+                'existing_mappings': mappings_dict,
+            })
         
         # Always save/update the template when a subscriber is set (enables future auto-mapping).
         # Also honour the explicit "save template" checkbox for sessions without a subscriber.
@@ -838,14 +1057,23 @@ def mapping_view(request, session_id):
                 if session.subscriber_id
                 else f"Template from {session.original_filename[:30]}"
             )
-            MappingTemplate.objects.update_or_create(
-                user=request.user,
-                header_signature=header_signature,
-                defaults={
-                    'name': name,
-                    'mappings': mappings_dict,
-                },
+            # Match in Python to avoid SQL Server NTEXT/NVARCHAR equality error
+            existing_tpl = next(
+                (t for t in MappingTemplate.objects.filter(user=request.user)
+                 if t.header_signature == header_signature),
+                None,
             )
+            if existing_tpl:
+                existing_tpl.name = name
+                existing_tpl.mappings = mappings_dict
+                existing_tpl.save()
+            else:
+                MappingTemplate.objects.create(
+                    user=request.user,
+                    header_signature=header_signature,
+                    name=name,
+                    mappings=mappings_dict,
+                )
 
         return redirect('process', session_id=session.id)
     
@@ -870,6 +1098,9 @@ def process_view(request, session_id):
     
     # Only start task if not already processing
     if session.status != 'processing':
+        session.status = 'processing'
+        session.error_message = ""
+        session.save()
         async_task('update.tasks.process_file_task', session_id)
     
     # Render processing page - polls session status
@@ -880,21 +1111,41 @@ def process_view(request, session_id):
 
 @login_required
 def task_progress_view(request, session_id):
-    """API endpoint to check task progress by session status"""
+    """API endpoint to check task progress — returns cache-based granular data."""
     session = get_object_or_404(UploadSession, id=session_id, user=request.user)
-    
+
     if session.status == 'processing':
-        response = {'current': 50, 'total': 100, 'status': 'Processing...'}
-    elif session.status == 'processed':
-        response = {'current': 100, 'total': 100, 'status': 'Complete!', 'rows_processed': session.rows_processed}
-    elif session.status == 'uploaded':
-        response = {'current': 100, 'total': 100, 'status': 'Complete!', 'rows_processed': session.rows_processed, 'rows_uploaded': session.rows_uploaded}
+        prog = get_progress(session_id, 'clean')
+        return JsonResponse({
+            'phase': 'clean',
+            'current': prog['percent'],
+            'status': prog['step'],
+            'detail': prog.get('detail', ''),
+        })
+    elif session.status == 'uploading_to_db':
+        prog = get_progress(session_id, 'dbupload')
+        return JsonResponse({
+            'phase': 'dbupload',
+            'current': prog['percent'],
+            'status': prog['step'],
+            'detail': prog.get('detail', ''),
+        })
+    elif session.status in ('processed', 'uploaded'):
+        return JsonResponse({
+            'phase': 'done',
+            'current': 100,
+            'status': 'Complete!',
+            'rows_processed': session.rows_processed,
+            'rows_uploaded': session.rows_uploaded,
+        })
     elif session.status == 'error':
-        response = {'current': 100, 'total': 100, 'status': session.error_message, 'error': True}
+        return JsonResponse({
+            'current': 100,
+            'status': session.error_message,
+            'error': True,
+        })
     else:
-        response = {'current': 0, 'total': 100, 'status': 'Waiting to start...'}
-    
-    return JsonResponse(response)
+        return JsonResponse({'current': 0, 'status': 'Waiting to start...'})
 
 
 @login_required
@@ -986,18 +1237,24 @@ def download_view(request, session_id):
         return redirect('result', session_id=session.id)
     
     file_path = session.processed_file.path
-    base_name = session.sheet_name if session.sheet_name else os.path.splitext(session.original_filename)[0]
+    base_name = session.sheet_name if session.sheet_name else (os.path.splitext(session.original_filename)[0] if session.original_filename else 'cleaned')
 
-    response = HttpResponse(
-        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    )
-    response['Content-Disposition'] = f'attachment; filename="cleaned_{base_name}.xlsx"'
-    
+    from django.conf import settings
+    excel_filename = f"processed_{base_name}.xlsx"
+    excel_path = os.path.join(settings.MEDIA_ROOT, 'processed', excel_filename)
+
+    if os.path.exists(excel_path):
+        response = FileResponse(open(excel_path, 'rb'), content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        response['Content-Disposition'] = f'attachment; filename="cleaned_{base_name}.xlsx"'
+        return response
+
     try:
-        _stream_parquet_as_excel(file_path, base_name, response)
+        write_parquet_as_excel(file_path, base_name, excel_path)
+        response = FileResponse(open(excel_path, 'rb'), content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        response['Content-Disposition'] = f'attachment; filename="cleaned_{base_name}.xlsx"'
         return response
     except Exception as e:
-        logger.error(f"Failed to stream processed Excel for session {session_id}: {e}", exc_info=True)
+        logger.error(f"Failed to generate/stream processed Excel for session {session_id}: {e}", exc_info=True)
         messages.error(request, f"Error generating Excel download: {str(e)}")
         return redirect('result', session_id=session.id)
 
@@ -1012,18 +1269,24 @@ def download_rejected_view(request, session_id):
         return redirect('result', session_id=session.id)
     
     file_path = session.rejected_file.path
-    base_name = session.sheet_name if session.sheet_name else os.path.splitext(session.original_filename)[0]
+    base_name = session.sheet_name if session.sheet_name else (os.path.splitext(session.original_filename)[0] if session.original_filename else 'rejected')
 
-    response = HttpResponse(
-        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    )
-    response['Content-Disposition'] = f'attachment; filename="rejected_{base_name}.xlsx"'
-    
+    from django.conf import settings
+    excel_filename = f"rejected_{base_name}.xlsx"
+    excel_path = os.path.join(settings.MEDIA_ROOT, 'processed', excel_filename)
+
+    if os.path.exists(excel_path):
+        response = FileResponse(open(excel_path, 'rb'), content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        response['Content-Disposition'] = f'attachment; filename="rejected_{base_name}.xlsx"'
+        return response
+
     try:
-        _stream_parquet_as_excel(file_path, f"rejected_{base_name}", response)
+        write_parquet_as_excel(file_path, f"rejected_{base_name}", excel_path)
+        response = FileResponse(open(excel_path, 'rb'), content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        response['Content-Disposition'] = f'attachment; filename="rejected_{base_name}.xlsx"'
         return response
     except Exception as e:
-        logger.error(f"Failed to stream rejected Excel for session {session_id}: {e}", exc_info=True)
+        logger.error(f"Failed to generate/stream rejected Excel for session {session_id}: {e}", exc_info=True)
         messages.error(request, f"Error generating Excel download: {str(e)}")
         return redirect('result', session_id=session.id)
 
@@ -1052,15 +1315,111 @@ def undo_upload_view(request, session_id):
 
 @login_required
 @require_POST
+def upload_to_db_view(request, session_id):
+    """Trigger BatchUpdate DB upload for a single already-processed session."""
+    session = get_object_or_404(UploadSession, id=session_id, user=request.user)
+
+    if session.status != 'processed' or not session.processed_file or not session.sheet_name:
+        return JsonResponse({'error': 'Session is not eligible for upload'}, status=400)
+
+    session.status = 'uploading_to_db'
+    session.error_message = ''
+    session.save()
+    async_task('update.tasks.upload_to_db_task', session_id)
+
+    return JsonResponse({'ok': True, 'message': 'Upload started'})
+
+
+@login_required
+@require_POST
+def upload_batch_to_db_view(request, batch_id):
+    """Trigger BatchUpdate DB upload for ALL processed sessions in a batch."""
+    sessions = UploadSession.objects.filter(
+        user=request.user,
+        batch_id=batch_id,
+        status='processed',
+    ).exclude(batchupdate_uploaded=True)
+
+    count = 0
+    for session in sessions:
+        if session.processed_file and session.sheet_name:
+            session.status = 'uploading_to_db'
+            session.error_message = ''
+            session.save()
+            async_task('update.tasks.upload_to_db_task', session.id)
+            count += 1
+
+    return JsonResponse({'ok': True, 'queued': count})
+
+
+@login_required
+@require_POST
+def retry_session_view(request, session_id):
+    """Re-queue processing task for an errored or failed session."""
+    session = get_object_or_404(UploadSession, id=session_id, user=request.user)
+
+    mappings = session.mappings.filter(target_column__isnull=False).exclude(target_column='')
+    if not mappings.exists():
+        messages.error(request, 'No columns mapped. Please map at least one column first.')
+        return redirect('mapping', session_id=session.id)
+
+    session.status = 'processing'
+    session.error_message = ''
+    session.save()
+    async_task('update.tasks.process_file_task', session.id)
+    messages.success(request, f'Retrying processing for {session.original_filename or "session"}.')
+    return redirect('process', session_id=session.id)
+
+
+@login_required
+@require_POST
 def delete_session_view(request, session_id):
     """Delete an upload session and its associated data"""
     session = get_object_or_404(UploadSession, id=session_id, user=request.user)
 
     try:
         filename = session.original_filename
+        
+        # Clean up cached Excel files
+        from django.conf import settings
+        base_name = session.sheet_name if session.sheet_name else os.path.splitext(session.original_filename)[0]
+        for cache_name in (f"processed_{base_name}.xlsx", f"rejected_{base_name}.xlsx"):
+            cache_path = os.path.join(settings.MEDIA_ROOT, 'processed', cache_name)
+            if os.path.exists(cache_path):
+                try:
+                    os.remove(cache_path)
+                except Exception:
+                    pass
+
+        # Invalidate batch combined cache if session belongs to a batch
+        if session.batch_id:
+            batch_excel_filename = f"batch_{session.batch_id}.xlsx"
+            batch_excel_path = os.path.join(settings.MEDIA_ROOT, 'processed', batch_excel_filename)
+            if os.path.exists(batch_excel_path):
+                try:
+                    os.remove(batch_excel_path)
+                except Exception:
+                    pass
+
         session.delete()
+
+        if request.headers.get('x-requested-with') == 'XMLHttpRequest':
+            from django.db.models import Sum
+            all_s = UploadSession.objects.filter(user=request.user)
+            return JsonResponse({
+                'success': True,
+                'message': f'Deleted session: {filename}',
+                'total_count': all_s.count(),
+                'uploaded_count': all_s.filter(status__in=['uploaded', 'processed']).count(),
+                'pending_count': all_s.filter(status__in=['pending_mapping', 'processing', 'uploading_to_db']).count(),
+                'error_count': all_s.filter(status='error').count(),
+                'total_rows_cleaned': all_s.filter(status__in=['uploaded', 'processed']).aggregate(total=Sum('rows_processed'))['total'] or 0,
+            })
+
         messages.success(request, f'Deleted session: {filename}')
     except Exception as e:
+        if request.headers.get('x-requested-with') == 'XMLHttpRequest':
+            return JsonResponse({'success': False, 'error': str(e)}, status=400)
         messages.error(request, f'Delete failed: {str(e)}')
 
     return redirect('upload')
@@ -1073,10 +1432,67 @@ def delete_batch_view(request, batch_id):
     sessions = UploadSession.objects.filter(user=request.user, batch_id=batch_id)
     count = sessions.count()
     if count == 0:
+        if request.headers.get('x-requested-with') == 'XMLHttpRequest':
+            return JsonResponse({'success': False, 'error': 'Batch not found.'}, status=404)
         messages.error(request, 'Batch not found.')
     else:
+        # Delete combined batch Excel and individual sheet cached Excel files from disk
+        from django.conf import settings
+        batch_excel_filename = f"batch_{batch_id}.xlsx"
+        batch_excel_path = os.path.join(settings.MEDIA_ROOT, 'processed', batch_excel_filename)
+        if os.path.exists(batch_excel_path):
+            try:
+                os.remove(batch_excel_path)
+            except Exception:
+                pass
+                
+        for s in sessions:
+            base_name = s.sheet_name if s.sheet_name else os.path.splitext(s.original_filename)[0]
+            for cache_name in (f"processed_{base_name}.xlsx", f"rejected_{base_name}.xlsx"):
+                cache_path = os.path.join(settings.MEDIA_ROOT, 'processed', cache_name)
+                if os.path.exists(cache_path):
+                    try:
+                        os.remove(cache_path)
+                    except Exception:
+                        pass
+
         sessions.delete()
+
+        if request.headers.get('x-requested-with') == 'XMLHttpRequest':
+            from django.db.models import Sum
+            all_s = UploadSession.objects.filter(user=request.user)
+            return JsonResponse({
+                'success': True,
+                'message': f'Deleted batch ({count} session{"s" if count != 1 else ""}).',
+                'total_count': all_s.count(),
+                'uploaded_count': all_s.filter(status__in=['uploaded', 'processed']).count(),
+                'pending_count': all_s.filter(status__in=['pending_mapping', 'processing', 'uploading_to_db']).count(),
+                'error_count': all_s.filter(status='error').count(),
+                'total_rows_cleaned': all_s.filter(status__in=['uploaded', 'processed']).aggregate(total=Sum('rows_processed'))['total'] or 0,
+            })
+
         messages.success(request, f'Deleted batch ({count} session{"s" if count != 1 else ""}).')
+    return redirect('upload')
+
+
+@login_required
+@require_POST
+def clear_all_errors_view(request):
+    """Delete all errored sessions for the user."""
+    count, _ = UploadSession.objects.filter(user=request.user, status='error').delete()
+    messages.success(request, f'Cleared {count} failed upload session{"s" if count != 1 else ""}.')
+    return redirect('upload')
+
+
+@login_required
+@require_POST
+def clear_all_pending_view(request):
+    """Delete all pending/stuck sessions for the user."""
+    count, _ = UploadSession.objects.filter(
+        user=request.user,
+        status__in=['pending_mapping', 'processing', 'uploading_to_db']
+    ).delete()
+    messages.success(request, f'Cleared {count} pending upload session{"s" if count != 1 else ""}.')
     return redirect('upload')
 
 
@@ -1098,6 +1514,9 @@ def batch_view(request, batch_id):
     uploaded_count = sessions.filter(status='uploaded').count()
     processed_count = sessions.filter(processed_file__isnull=False).exclude(processed_file='').count()
     has_processing = sessions.filter(status='processing').exists()
+    has_uploading = sessions.filter(status='uploading_to_db').exists()
+    
+    unmapped_sheets = list(sessions.filter(status='pending_mapping').values_list('original_filename', flat=True))
     
     return render(request, 'update/batch.html', {
         'sessions': sessions,
@@ -1108,7 +1527,9 @@ def batch_view(request, batch_id):
         'uploaded_count': uploaded_count,
         'processed_count': processed_count,
         'has_processing': has_processing,
+        'has_uploading': has_uploading,
         'is_external': _is_external(request.user),
+        'unmapped_sheets': unmapped_sheets,
     })
 
 
@@ -1124,7 +1545,7 @@ def batch_progress_view(request, batch_id):
     for s in sessions:
         sheets.append({
             'id': s.id,
-            'name': s.sheet_name,
+            'name': s.original_filename or s.sheet_name,
             'status': s.status,
             'status_display': s.get_status_display(),
             'rows_processed': s.rows_processed,
@@ -1132,21 +1553,87 @@ def batch_progress_view(request, batch_id):
             'rows_rejected': s.rows_rejected,
             'batchupdate_uploaded': s.batchupdate_uploaded,
             'error_message': s.error_message or '',
+            'has_processed_file': bool(s.processed_file),
+            'has_rejected_file': bool(s.rejected_file),
+            'has_script': bool(s.generated_script),
         })
+
+    # Enrich processing / uploading_to_db sessions with their live progress
+    for sheet in sheets:
+        if sheet['status'] == 'processing':
+            prog = get_progress(sheet['id'], 'clean')
+            sheet['clean_progress'] = prog.get('percent', 0)
+            sheet['clean_step'] = prog.get('step', '')
+        elif sheet['status'] == 'uploading_to_db':
+            prog = get_progress(sheet['id'], 'dbupload')
+            sheet['db_upload_progress'] = prog.get('percent', 0)
+            sheet['db_upload_step'] = prog.get('step', '')
 
     total = len(sheets)
     done = sum(1 for s in sheets if s['status'] in ('uploaded', 'processed'))
     errored = sum(1 for s in sheets if s['status'] == 'error')
-    processing = sum(1 for s in sheets if s['status'] == 'processing')
-    all_done = (done + errored) == total and processing == 0
+    in_progress = sum(1 for s in sheets if s['status'] in ('processing', 'uploading_to_db'))
+    all_done = (done + errored) == total and in_progress == 0
 
     return JsonResponse({
         'sheets': sheets,
         'total': total,
         'done': done,
         'errored': errored,
-        'processing': processing,
+        'processing': in_progress,
         'all_done': all_done,
+    })
+
+
+@login_required
+def recent_sessions_status_api(request):
+    """
+    Lightweight JSON endpoint to poll current statuses for sessions displayed on the dashboard.
+    Accepts comma-separated session IDs via ?ids=1,2,3 or defaults to recent active sessions.
+    """
+    ids_param = request.GET.get('ids', '').strip()
+    qs = UploadSession.objects.filter(user=request.user)
+    if ids_param:
+        try:
+            ids = [int(x.strip()) for x in ids_param.split(',') if x.strip().isdigit()]
+            qs = qs.filter(id__in=ids)
+        except Exception:
+            pass
+    else:
+        qs = qs.filter(status__in=['processing', 'uploading_to_db', 'pending_mapping'])[:50]
+
+    all_user_sessions = UploadSession.objects.filter(user=request.user)
+    total_count = all_user_sessions.count()
+    uploaded_count = all_user_sessions.filter(status__in=['uploaded', 'processed']).count()
+    pending_count = all_user_sessions.filter(status__in=['pending_mapping', 'processing', 'uploading_to_db']).count()
+    error_count = all_user_sessions.filter(status='error').count()
+    from django.db.models import Sum
+    total_rows_cleaned = all_user_sessions.filter(status__in=['uploaded', 'processed']).aggregate(total=Sum('rows_processed'))['total'] or 0
+
+    sessions_data = []
+    for s in qs:
+        sessions_data.append({
+            'id': s.id,
+            'status': s.status,
+            'status_display': s.get_status_display(),
+            'rows_processed': s.rows_processed,
+            'rows_uploaded': s.rows_uploaded,
+            'rows_rejected': s.rows_rejected,
+            'batch_id': str(s.batch_id) if s.batch_id else None,
+            'error_message': s.error_message or '',
+            'has_processed_file': bool(s.processed_file),
+            'has_rejected_file': bool(s.rejected_file),
+        })
+
+    return JsonResponse({
+        'sessions': sessions_data,
+        'stats': {
+            'total_count': total_count,
+            'uploaded_count': uploaded_count,
+            'pending_count': pending_count,
+            'error_count': error_count,
+            'total_rows_cleaned': total_rows_cleaned,
+        }
     })
 
 
@@ -1167,15 +1654,20 @@ def download_batch_combined(request, batch_id):
         messages.error(request, 'Batch not found.')
         return redirect('upload')
 
-    response = HttpResponse(
-        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    )
     source_filename = sessions.first().source_filename or str(batch_id)
     base_name = os.path.splitext(source_filename)[0]
-    response['Content-Disposition'] = f'attachment; filename="cleaned_{base_name}.xlsx"'
 
-    # Initialize the workbook directly on the HTTP response with constant_memory enabled
-    workbook = xlsxwriter.Workbook(response, {'constant_memory': True})
+    from django.conf import settings
+    batch_excel_filename = f"batch_{batch_id}.xlsx"
+    batch_excel_path = os.path.join(settings.MEDIA_ROOT, 'processed', batch_excel_filename)
+
+    if os.path.exists(batch_excel_path):
+        response = FileResponse(open(batch_excel_path, 'rb'), content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        response['Content-Disposition'] = f'attachment; filename="cleaned_{base_name}.xlsx"'
+        return response
+
+    # Initialize the workbook on the filesystem path
+    workbook = xlsxwriter.Workbook(batch_excel_path, {'constant_memory': True})
 
     # Formats must be combined upfront — xlsxwriter applies format at write time
     header_format = workbook.add_format({'bold': False})
@@ -1188,6 +1680,7 @@ def download_batch_combined(request, batch_id):
     account_no_names = {'AccountNo'}
 
     sheets_added = 0
+    file_sheet_counters = {}  # maps case-insensitive base filename to count of worksheets added
 
     for session in sessions:
         if not session.processed_file:
@@ -1196,7 +1689,19 @@ def download_batch_combined(request, batch_id):
         if not os.path.exists(file_path):
             continue
 
-        sheet_title = to_excel_safe_sheet_name(session.sheet_name or session.original_filename)
+        # Prioritize session.sheet_name so worksheet title reflects standardized naming convention
+        file_name = session.sheet_name or session.source_filename or session.original_filename
+        base_file_name = to_excel_safe_sheet_name(os.path.splitext(file_name)[0] if '.' in file_name else file_name)
+
+        count = file_sheet_counters.get(base_file_name.lower(), 0)
+        file_sheet_counters[base_file_name.lower()] = count + 1
+
+        if count == 0:
+            sheet_title = base_file_name
+        else:
+            suffix = f"_{count}"
+            sheet_title = f"{base_file_name[:31 - len(suffix)]}{suffix}"
+
         ws = workbook.add_worksheet(sheet_title)
         
         try:
@@ -1238,10 +1743,17 @@ def download_batch_combined(request, batch_id):
 
     if sheets_added == 0:
         workbook.close()
+        try:
+            os.remove(batch_excel_path)
+        except Exception:
+            pass
         messages.error(request, 'No processed sheets available yet. Complete mapping and processing first.')
         return redirect('batch', batch_id=batch_id)
 
     workbook.close()
+
+    response = FileResponse(open(batch_excel_path, 'rb'), content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    response['Content-Disposition'] = f'attachment; filename="cleaned_{base_name}.xlsx"'
     return response
 
 
@@ -1333,21 +1845,36 @@ def batch_mapping_view(request, batch_id):
                     mappings_dict[header] = target
 
             if mappings_dict:
+                if 'account_number' not in mappings_dict.values():
+                    messages.warning(request, f'Sheet "{session.original_filename}" was not processed because Account Number is not mapped. Please map Account Number.')
+                    continue
+
                 sessions_to_process.append(session)
 
                 if request.POST.get('save_template'):
                     header_signature = json.dumps(sorted(headers))
-                    MappingTemplate.objects.update_or_create(
-                        user=request.user,
-                        header_signature=header_signature,
-                        defaults={
-                            'name': f"Template from {session.original_filename[:30]}",
-                            'mappings': mappings_dict,
-                        },
+                    # Match in Python to avoid SQL Server NTEXT/NVARCHAR equality error
+                    _tpl_name = f"Template from {session.original_filename[:30]}"
+                    existing_tpl = next(
+                        (t for t in MappingTemplate.objects.filter(user=request.user)
+                         if t.header_signature == header_signature),
+                        None,
                     )
+                    if existing_tpl:
+                        existing_tpl.name = _tpl_name
+                        existing_tpl.mappings = mappings_dict
+                        existing_tpl.save()
+                    else:
+                        MappingTemplate.objects.create(
+                            user=request.user,
+                            header_signature=header_signature,
+                            name=_tpl_name,
+                            mappings=mappings_dict,
+                        )
 
         for session in sessions_to_process:
             session.status = 'processing'
+            session.error_message = ""
             session.save()
             async_task('update.tasks.process_file_task', session.id)
 

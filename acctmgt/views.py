@@ -7,12 +7,24 @@ from django.db import transaction
 from django.views.decorators.cache import never_cache
 
 from .models import Subscriber, SubscriberToken, UserSubscriberProfile
-from .utils import is_external, require_bound, rate_limit
+from .utils import is_external, require_bound, rate_limit, is_internal_dropper
 from update.services import get_subscribers_from_batchupdate
 
 # Private aliases kept for any legacy imports
 _is_external = is_external
 _require_bound = require_bound
+
+
+def _redirect_after_login(user):
+    """Determine landing page based on user role."""
+    if user.is_staff:
+        return redirect('upload')
+    if is_internal_dropper(user):
+        return redirect('client_drop')
+    if is_external(user) and require_bound(user):
+        return redirect('redeem_token')
+    return redirect('upload')
+
 
 
 @never_cache
@@ -103,9 +115,7 @@ def redeem_token_view(request):
 def login_view(request):
     """User login page."""
     if request.user.is_authenticated:
-        if _require_bound(request.user):
-            return redirect('redeem_token')
-        return redirect('upload')
+        return _redirect_after_login(request.user)
 
     if request.method == 'POST':
         username = request.POST.get('username')
@@ -114,7 +124,7 @@ def login_view(request):
 
         if user is not None:
             login(request, user)
-            return redirect('upload')
+            return _redirect_after_login(user)
         else:
             messages.error(request, 'Invalid username or password')
 
