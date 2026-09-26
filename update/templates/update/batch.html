@@ -118,6 +118,7 @@
     .db-yes     { background: rgba(34,197,94,0.12); color: #15803d; }
     .db-no      { background: rgba(239,68,68,0.12); color: #b91c1c; }
     .db-pending { background: rgba(245,158,11,0.12); color: #d97706; }
+    .db-duplicate { background: rgba(245,158,11,0.18); color: #b45309; border: 1px solid rgba(245,158,11,0.4); }
     .db-uploading { background: rgba(59,130,246,0.12); color: #2563eb; }
     .db-uploading::after {
         content: '';
@@ -305,6 +306,8 @@
                         <span class="db-badge db-uploading">Uploading...</span>
                     {% elif session.status == 'error' %}
                         <span class="db-badge db-no">Failed</span>
+                    {% elif session.is_duplicate %}
+                        <span class="db-badge db-duplicate" title="Already in BatchUpdate table [{{ session.duplicate_table }}]">Duplicate</span>
                     {% else %}
                         <span class="db-badge db-pending">Pending</span>
                     {% endif %}
@@ -452,6 +455,8 @@
             buCell.innerHTML = '<span class="db-badge db-uploading">' + stepText + ' (' + buPct + '%)</span>';
           } else if (sheet.status === 'error') {
             buCell.innerHTML = '<span class="db-badge db-no">Failed</span>';
+          } else if (sheet.is_duplicate) {
+            buCell.innerHTML = '<span class="db-badge db-duplicate" title="Already in BatchUpdate table [' + (sheet.duplicate_table || '') + ']">Duplicate</span>';
           } else {
             buCell.innerHTML = '<span class="db-badge db-pending">Pending</span>';
           }
@@ -508,13 +513,13 @@
   }
 
   // Show/hide "Upload All to BatchUpdate" button based on whether any processed
-  // sessions exist that haven't been uploaded yet.
+  // sessions exist that haven't been uploaded yet (excluding duplicates).
   function updateBulkUploadBtn() {
     fetch(progressUrl)
       .then(function(r) { return r.json(); })
       .then(function(data) {
         var eligible = data.sheets.filter(function(s) {
-          return s.status === 'processed' && !s.batchupdate_uploaded;
+          return s.status === 'processed' && !s.batchupdate_uploaded && !s.is_duplicate;
         }).length;
         var btn = document.getElementById('btnUploadAllDb');
         if (btn) btn.style.display = eligible > 0 ? '' : 'none';
@@ -541,6 +546,9 @@
         }
         pollProgress();
         if (btn) btn.style.display = 'none';
+        if (data.skipped > 0) {
+          alert('Queued ' + data.queued + ' file(s) for upload. ' + data.skipped + ' duplicate file(s) were automatically skipped.');
+        }
       }
     })
     .catch(function(err) { if (btn) { btn.disabled = false; btn.textContent = 'Upload All to BatchUpdate'; } });

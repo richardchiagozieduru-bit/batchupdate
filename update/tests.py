@@ -1811,9 +1811,250 @@ class GetFileHeadersTests(TestCase):
             if os.path.exists(f_path):
                 os.remove(f_path)
 
+    def test_compute_parquet_fingerprint_deterministic(self):
+        import tempfile
+        import pandas as pd
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from update.tasks import compute_parquet_fingerprint, CLEANED_ARROW_SCHEMA
 
+        df1 = pd.DataFrame({
+            'AccountNo': ['123', '456'],
+            'CurrentBalanceAmt': [100.0, 200.0],
+            'AmountOverdue': [0.0, 50.0],
+            'MonthsInArrears': [0.0, 1.0],
+            'LoanClassification': ['Perf', 'Sub'],
+            'AccountStatusCode': ['ACT', 'ACT'],
+        })
+        table1 = pa.Table.from_pandas(df1, schema=CLEANED_ARROW_SCHEMA, preserve_index=False)
+        with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as f1:
+            p1 = f1.name
+        with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as f2:
+            p2 = f2.name
+        with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as f3:
+            p3 = f3.name
 
+        try:
+            pq.write_table(table1, p1, compression='snappy')
+            pq.write_table(table1, p2, compression='snappy')
 
+            # Different data
+            df2 = df1.copy()
+            df2.loc[0, 'CurrentBalanceAmt'] = 999.0
+            table2 = pa.Table.from_pandas(df2, schema=CLEANED_ARROW_SCHEMA, preserve_index=False)
+            pq.write_table(table2, p3, compression='snappy')
 
+            fp1 = compute_parquet_fingerprint(p1)
+            fp2 = compute_parquet_fingerprint(p2)
+            fp3 = compute_parquet_fingerprint(p3)
 
+            self.assertEqual(fp1, fp2)
+            self.assertNotEqual(fp1, fp3)
+            self.assertTrue(len(fp1) == 64)
+        finally:
+            import os
+            for p in (p1, p2, p3):
+                if os.path.exists(p):
+                    os.remove(p)
+
+    def test_upload_to_db_task_blocks_duplicate(self):
+        import tempfile
+        from unittest.mock import patch
+        import pandas as pd
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from django.contrib.auth.models import User
+        from django.core.files.base import ContentFile
+        from update.models import UploadSession, ImplementedArtifact
+        from update.tasks import upload_to_db_task, compute_parquet_fingerprint, CLEANED_ARROW_SCHEMA
+
+        user = User.objects.create_user(username="dup_guard_user", password="pwd")
+        df = pd.DataFrame({
+            'AccountNo': ['111'],
+            'CurrentBalanceAmt': [100.0],
+            'AmountOverdue': [0.0],
+            'MonthsInArrears': [0.0],
+            'LoanClassification': ['Perf'],
+            'AccountStatusCode': ['ACT'],
+        })
+        table = pa.Table.from_pandas(df, schema=CLEANED_ARROW_SCHEMA, preserve_index=False)
+        with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as f:
+            p_path = f.name
+        pq.write_table(table, p_path, compression='snappy')
+
+        try:
+            fp = compute_parquet_fingerprint(p_path)
+            # Prior implemented artifact by another user
+            other_user = User.objects.create_user(username="prior_user", password="pwd")
+            ImplementedArtifact.objects.create(
+                content_fingerprint=fp,
+                table_name="388_10092026_access",
+                rows_uploaded=1,
+                implemented_by=other_user,
+            )
+
+            # New session by dup_guard_user
+            with open(p_path, 'rb') as f_read:
+                session = UploadSession.objects.create(
+                    user=user,
+                    original_filename="access.xlsx",
+                    sheet_name="388_10092026_access_1",
+                    status="processed",
+                    processed_file=ContentFile(f_read.read(), name="processed_access.parquet"),
+                    content_fingerprint=fp,
+                )
+
+            with patch('update.tasks.upload_parquet_to_batchupdate') as mock_upload:
+                result = upload_to_db_task(session.id)
+                mock_upload.assert_not_called()
+
+            session.refresh_from_db()
+            self.assertIn("Duplicate skipped", result)
+            self.assertFalse(session.batchupdate_uploaded)
+            self.assertIn("already uploaded to table [388_10092026_access]", session.error_message)
+        finally:
+            import os
+            if os.path.exists(p_path):
+                os.remove(p_path)
+
+    def test_upload_to_db_task_registers_artifact_on_success(self):
+        import tempfile
+        from unittest.mock import patch
+        import pandas as pd
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from django.contrib.auth.models import User
+        from django.core.files.base import ContentFile
+        from update.models import UploadSession, ImplementedArtifact
+        from update.tasks import upload_to_db_task, compute_parquet_fingerprint, CLEANED_ARROW_SCHEMA
+
+        user = User.objects.create_user(username="success_user", password="pwd")
+        df = pd.DataFrame({
+            'AccountNo': ['999'],
+            'CurrentBalanceAmt': [500.0],
+            'AmountOverdue': [0.0],
+            'MonthsInArrears': [0.0],
+            'LoanClassification': ['Perf'],
+            'AccountStatusCode': ['ACT'],
+        })
+        table = pa.Table.from_pandas(df, schema=CLEANED_ARROW_SCHEMA, preserve_index=False)
+        with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as f:
+            p_path = f.name
+        pq.write_table(table, p_path, compression='snappy')
+
+        try:
+            fp = compute_parquet_fingerprint(p_path)
+            with open(p_path, 'rb') as f_read:
+                session = UploadSession.objects.create(
+                    user=user,
+                    original_filename="new_file.xlsx",
+                    sheet_name="388_26092026_new",
+                    status="processed",
+                    processed_file=ContentFile(f_read.read(), name="processed_new.parquet"),
+                    content_fingerprint=fp,
+                )
+
+            with patch('update.tasks.upload_parquet_to_batchupdate', return_value=1):
+                result = upload_to_db_task(session.id)
+
+            session.refresh_from_db()
+            self.assertTrue(session.batchupdate_uploaded)
+            self.assertEqual(session.status, 'uploaded')
+
+            art = ImplementedArtifact.objects.filter(content_fingerprint=fp).first()
+            self.assertIsNotNone(art)
+            self.assertEqual(art.table_name, "388_26092026_new")
+            self.assertEqual(art.implemented_by, user)
+        finally:
+            import os
+            if os.path.exists(p_path):
+                os.remove(p_path)
+
+    def test_upload_batch_skips_duplicates(self):
+        import uuid
+        from unittest.mock import patch
+        from django.contrib.auth.models import User
+        from django.test import RequestFactory
+        from django.core.files.base import ContentFile
+        from update.models import UploadSession, ImplementedArtifact
+        from update.views import upload_batch_to_db_view
+        import json
+
+        user = User.objects.create_user(username="batch_test_user", password="pwd")
+        batch_id = uuid.uuid4()
+
+        # Session 1 is already implemented
+        ImplementedArtifact.objects.create(
+            content_fingerprint="batch_dup_fp_123",
+            table_name="already_implemented_tbl",
+            rows_uploaded=10,
+        )
+
+        s1 = UploadSession.objects.create(
+            user=user,
+            batch_id=batch_id,
+            status='processed',
+            sheet_name='tbl_1',
+            processed_file=ContentFile(b'dummy', name='f1.parquet'),
+            content_fingerprint="batch_dup_fp_123",
+        )
+
+        # Session 2 is new
+        s2 = UploadSession.objects.create(
+            user=user,
+            batch_id=batch_id,
+            status='processed',
+            sheet_name='tbl_2',
+            processed_file=ContentFile(b'dummy', name='f2.parquet'),
+            content_fingerprint="batch_new_fp_456",
+        )
+
+        factory = RequestFactory()
+        request = factory.post(f'/batch/{batch_id}/upload-to-db/')
+        request.user = user
+
+        with patch('update.views.async_task') as mock_async:
+            resp = upload_batch_to_db_view(request, batch_id)
+
+        data = json.loads(resp.content)
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['queued'], 1)
+        self.assertEqual(data['skipped'], 1)
+
+        mock_async.assert_called_once_with('update.tasks.upload_to_db_task', s2.id)
+
+    def test_cleanup_preserves_implemented_artifacts(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        from django.contrib.auth.models import User
+        from update.models import UploadSession, ImplementedArtifact
+        from update.tasks import cleanup_old_sessions_task
+
+        user = User.objects.create_user(username="cleanup_user", password="pwd")
+        old_time = timezone.now() - timedelta(days=40)
+
+        session = UploadSession.objects.create(
+            user=user,
+            status='uploaded',
+            batchupdate_uploaded=True,
+            original_filename='old.xlsx',
+            sheet_name='388_01012026_access',
+        )
+        UploadSession.objects.filter(id=session.id).update(uploaded_at=old_time)
+
+        art = ImplementedArtifact.objects.create(
+            content_fingerprint="cleanup_test_fp",
+            table_name="388_01012026_access",
+            rows_uploaded=50,
+            implemented_by=user,
+            source_session=session,
+        )
+
+        cleanup_old_sessions_task()
+
+        self.assertFalse(UploadSession.objects.filter(id=session.id).exists())
+        # ImplementedArtifact must still exist!
+        art.refresh_from_db()
+        self.assertIsNotNone(art)
+        self.assertIsNone(art.source_session)
 

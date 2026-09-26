@@ -269,10 +269,30 @@
     <div class="db-upload-section" id="dbUploadSection">
         <h3>Upload to BatchUpdate</h3>
         <p>You've reviewed the output. Ready to push the cleaned data to the database?</p>
+        {% if duplicate_artifact %}
+        <div style="background: #fffbeb; border: 1px solid #fef3c7; border-left: 4px solid #f59e0b; padding: 1rem; border-radius: 8px; margin-bottom: 1.25rem;">
+            <div style="display: flex; align-items: flex-start; gap: 0.75rem;">
+                <span style="font-size: 1.25rem; line-height: 1;">⚠️</span>
+                <div>
+                    <div style="font-weight: 600; color: #92400e; margin-bottom: 0.25rem;">Duplicate Content Detected</div>
+                    <div style="font-size: 0.9rem; color: #b45309; line-height: 1.4;">
+                        This exact cleaned dataset was already uploaded to BatchUpdate table
+                        <code style="background: #fde68a; padding: 0.15rem 0.4rem; border-radius: 4px; font-weight: 600; color: #78350f;">[{{ duplicate_artifact.table_name }}]</code>
+                        on {{ duplicate_artifact.implemented_at|date:"M d, Y" }}{% if duplicate_artifact.implemented_by %} by <strong>{{ duplicate_artifact.implemented_by.username }}</strong>{% endif %}.
+                    </div>
+                </div>
+            </div>
+        </div>
+        <button class="btn-upload-db" id="btnUploadDb" disabled style="opacity: 0.6; cursor: not-allowed; background: #6b7280;" title="This dataset has already been uploaded to BatchUpdate.">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            Already Uploaded to BatchUpdate
+        </button>
+        {% else %}
         <button class="btn-upload-db" id="btnUploadDb" onclick="triggerDbUpload()">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             Confirm & Upload to BatchUpdate
         </button>
+        {% endif %}
         <div class="db-progress-wrap" id="dbProgressWrap">
             <div class="db-progress-label">
                 <span id="dbProgressStep">Starting...</span>

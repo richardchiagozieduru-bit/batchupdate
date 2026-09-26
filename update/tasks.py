@@ -42,6 +42,30 @@ REJECTED_ARROW_SCHEMA = pa.schema([
 ])
 
 
+def compute_parquet_fingerprint(parquet_path):
+    """
+    Compute a deterministic SHA-256 fingerprint for a cleaned Parquet file.
+    Hashes column names, row count, and raw Arrow columnar buffer chunks.
+    """
+    if not parquet_path or not os.path.exists(parquet_path):
+        return ''
+
+    hasher = hashlib.sha256()
+    pf = pq.ParquetFile(parquet_path)
+    hasher.update(str(pf.metadata.num_rows).encode('utf-8'))
+    for col_name in pf.schema.names:
+        hasher.update(col_name.encode('utf-8'))
+
+    for batch in pf.iter_batches(batch_size=10000):
+        for col_name in pf.schema.names:
+            col_arr = batch.column(col_name)
+            for buf in col_arr.buffers():
+                if buf:
+                    hasher.update(buf)
+
+    return hasher.hexdigest()
+
+
 def _load_and_clean(file_path, mappings, header_row, session_id, cleaned_parquet_path, rejected_parquet_path):
     """
     Load a file and clean it, using chunked processing for large Excel or CSV files.
@@ -336,7 +360,17 @@ def process_file_task(session_id):
         session.rows_processed = cleaned_count
         session.rows_rejected = rejected_count
         session.status = 'processed'
+        if cleaned_count > 0 and os.path.exists(cleaned_parquet_path):
+            session.content_fingerprint = compute_parquet_fingerprint(cleaned_parquet_path)
         session.save()
+
+        # Check if identical cleaned data was already implemented
+        duplicate_artifact = None
+        if session.content_fingerprint:
+            from .models import ImplementedArtifact
+            duplicate_artifact = ImplementedArtifact.objects.filter(
+                content_fingerprint=session.content_fingerprint
+            ).exclude(source_session_id=session.id).first()
 
         # Pre-generate Excel files for download caching
         # Prioritize session.sheet_name (standardized subid_ddmmyyyy_name format)
@@ -374,13 +408,26 @@ def process_file_task(session_id):
         # If upload_to_db was toggled ON at upload time, chain the DB upload as a
         # separate async task so it gets its own progress tracking.
         if session.upload_to_db and session.sheet_name:
-            from django_q.tasks import async_task
-            set_progress(session_id, 'clean', step='Complete — queueing DB upload...', percent=100)
-            async_task('update.tasks.upload_to_db_task', session_id)
-            logger.info(f"[Session {session_id}] Cleaning done, chained upload_to_db_task")
+            if duplicate_artifact:
+                session.error_message = (
+                    f"Duplicate detected: Identical dataset already exists in BatchUpdate table "
+                    f"[{duplicate_artifact.table_name}] uploaded on {duplicate_artifact.implemented_at.strftime('%Y-%m-%d')}."
+                )
+                session.save(update_fields=['error_message'])
+                set_progress(session_id, 'clean', step='Complete (Duplicate skipped)', percent=100,
+                             detail=f'Already in [{duplicate_artifact.table_name}]')
+                logger.info(f"[Session {session_id}] Database upload skipped because file is a duplicate of [{duplicate_artifact.table_name}]")
+            else:
+                from django_q.tasks import async_task
+                set_progress(session_id, 'clean', step='Complete — queueing DB upload...', percent=100)
+                async_task('update.tasks.upload_to_db_task', session_id)
+                logger.info(f"[Session {session_id}] Cleaning done, chained upload_to_db_task")
         else:
+            detail_msg = f'{cleaned_count:,} cleaned, {rejected_count:,} rejected'
+            if duplicate_artifact:
+                detail_msg += f' (Duplicate of [{duplicate_artifact.table_name}])'
             set_progress(session_id, 'clean', step='Complete!', percent=100,
-                         detail=f'{cleaned_count:,} cleaned, {rejected_count:,} rejected')
+                         detail=detail_msg)
             logger.info(f"[Session {session_id}] Database upload skipped (upload_to_db={session.upload_to_db}, sheet_name={session.sheet_name})")
 
         result = f'Complete! {cleaned_count} processed, {rejected_count} rejected'
@@ -416,6 +463,30 @@ def upload_to_db_task(session_id):
         if not parquet_path or not os.path.exists(parquet_path):
             raise FileNotFoundError(f"Cleaned parquet file not found: {parquet_path}")
 
+        # Authoritative duplicate check before streaming to SQL Server
+        fingerprint = session.content_fingerprint
+        if not fingerprint and os.path.exists(parquet_path):
+            fingerprint = compute_parquet_fingerprint(parquet_path)
+            session.content_fingerprint = fingerprint
+            session.save(update_fields=['content_fingerprint'])
+
+        if fingerprint:
+            from .models import ImplementedArtifact
+            existing = ImplementedArtifact.objects.filter(
+                content_fingerprint=fingerprint
+            ).exclude(source_session_id=session.id).first()
+            if existing:
+                logger.warning(f"[Session {session_id}] Blocked duplicate upload: matches existing [{existing.table_name}]")
+                session.status = 'processed'
+                session.error_message = (
+                    f"Duplicate skipped: This exact dataset was already uploaded to table "
+                    f"[{existing.table_name}] on {existing.implemented_at.strftime('%Y-%m-%d')}."
+                )
+                session.save()
+                set_progress(session_id, 'dbupload', step='Duplicate Skipped', percent=100,
+                             detail=f"Already in [{existing.table_name}]")
+                return f"Duplicate skipped: already in [{existing.table_name}]"
+
         set_progress(session_id, 'dbupload', step='Uploading rows to BatchUpdate...', percent=30)
         rows_uploaded = upload_parquet_to_batchupdate(parquet_path, session.sheet_name)
 
@@ -423,6 +494,21 @@ def upload_to_db_task(session_id):
         session.rows_uploaded = rows_uploaded
         session.status = 'uploaded'
         session.save()
+
+        # Atomically register in ImplementedArtifact
+        if fingerprint:
+            from .models import ImplementedArtifact
+            ImplementedArtifact.objects.get_or_create(
+                content_fingerprint=fingerprint,
+                defaults={
+                    'table_name': session.sheet_name,
+                    'subscriber': session.subscriber,
+                    'rows_uploaded': rows_uploaded,
+                    'implemented_by': session.user,
+                    'source_session': session,
+                }
+            )
+
         set_progress(session_id, 'dbupload', step='Complete!', percent=100,
                      detail=f'{rows_uploaded:,} rows uploaded')
         logger.info(f"[Session {session_id}] Uploaded {rows_uploaded} rows to BatchUpdate table [{session.sheet_name}]")

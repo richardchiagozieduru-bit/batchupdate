@@ -1157,10 +1157,18 @@ def result_view(request, session_id):
     mappings = session.mappings.filter(target_column__isnull=False).exclude(target_column='')
     external = _is_external(request.user)
 
+    duplicate_artifact = None
+    if session.content_fingerprint:
+        from .models import ImplementedArtifact
+        duplicate_artifact = ImplementedArtifact.objects.filter(
+            content_fingerprint=session.content_fingerprint
+        ).exclude(source_session_id=session.id).first()
+
     return render(request, 'update/result.html', {
         'session': session,
         'mappings': mappings,
         'is_external': external,
+        'duplicate_artifact': duplicate_artifact,
     })
 
 
@@ -1321,6 +1329,17 @@ def upload_to_db_view(request, session_id):
     if session.status != 'processed' or not session.processed_file or not session.sheet_name:
         return JsonResponse({'error': 'Session is not eligible for upload'}, status=400)
 
+    # Check if duplicate of an already implemented table
+    if session.content_fingerprint:
+        from .models import ImplementedArtifact
+        existing = ImplementedArtifact.objects.filter(
+            content_fingerprint=session.content_fingerprint
+        ).exclude(source_session_id=session.id).first()
+        if existing:
+            return JsonResponse({
+                'error': f'Upload blocked: Identical dataset already exists in BatchUpdate table [{existing.table_name}] uploaded on {existing.implemented_at.strftime("%Y-%m-%d")}.'
+            }, status=400)
+
     session.status = 'uploading_to_db'
     session.error_message = ''
     session.save()
@@ -1339,16 +1358,40 @@ def upload_batch_to_db_view(request, batch_id):
         status='processed',
     ).exclude(batchupdate_uploaded=True)
 
+    from .models import ImplementedArtifact
+    seen_fingerprints = set()
     count = 0
+    skipped = 0
+
     for session in sessions:
         if session.processed_file and session.sheet_name:
+            fp = session.content_fingerprint
+            if fp:
+                # Check intra-batch duplicate or existing implemented artifact
+                if fp in seen_fingerprints:
+                    session.error_message = 'Duplicate skipped: Identical to another file in this batch.'
+                    session.save(update_fields=['error_message'])
+                    skipped += 1
+                    continue
+
+                existing = ImplementedArtifact.objects.filter(
+                    content_fingerprint=fp
+                ).exclude(source_session_id=session.id).first()
+                if existing:
+                    session.error_message = f'Duplicate skipped: Already exists in table [{existing.table_name}].'
+                    session.save(update_fields=['error_message'])
+                    skipped += 1
+                    continue
+
+                seen_fingerprints.add(fp)
+
             session.status = 'uploading_to_db'
             session.error_message = ''
             session.save()
             async_task('update.tasks.upload_to_db_task', session.id)
             count += 1
 
-    return JsonResponse({'ok': True, 'queued': count})
+    return JsonResponse({'ok': True, 'queued': count, 'skipped': skipped})
 
 
 @login_required
@@ -1516,6 +1559,21 @@ def batch_view(request, batch_id):
     has_uploading = sessions.filter(status='uploading_to_db').exists()
     
     unmapped_sheets = list(sessions.filter(status='pending_mapping').values_list('original_filename', flat=True))
+
+    from .models import ImplementedArtifact
+    fingerprints = [s.content_fingerprint for s in sessions if s.content_fingerprint]
+    implemented_map = {}
+    if fingerprints:
+        for art in ImplementedArtifact.objects.filter(content_fingerprint__in=fingerprints):
+            implemented_map[art.content_fingerprint] = art.table_name
+
+    for s in sessions:
+        if s.content_fingerprint and s.content_fingerprint in implemented_map:
+            s.is_duplicate = True
+            s.duplicate_table = implemented_map[s.content_fingerprint]
+        else:
+            s.is_duplicate = False
+            s.duplicate_table = ''
     
     return render(request, 'update/batch.html', {
         'sessions': sessions,
@@ -1540,8 +1598,21 @@ def batch_progress_view(request, batch_id):
         batch_id=batch_id,
     ).order_by('uploaded_at')
 
+    from .models import ImplementedArtifact
+    fingerprints = [s.content_fingerprint for s in sessions if s.content_fingerprint]
+    implemented_map = {}
+    if fingerprints:
+        for art in ImplementedArtifact.objects.filter(content_fingerprint__in=fingerprints):
+            implemented_map[art.content_fingerprint] = art.table_name
+
     sheets = []
     for s in sessions:
+        is_dup = False
+        dup_table = ''
+        if s.content_fingerprint and s.content_fingerprint in implemented_map:
+            is_dup = True
+            dup_table = implemented_map[s.content_fingerprint]
+
         sheets.append({
             'id': s.id,
             'name': s.original_filename or s.sheet_name,
@@ -1551,6 +1622,8 @@ def batch_progress_view(request, batch_id):
             'rows_uploaded': s.rows_uploaded,
             'rows_rejected': s.rows_rejected,
             'batchupdate_uploaded': s.batchupdate_uploaded,
+            'is_duplicate': is_dup,
+            'duplicate_table': dup_table,
             'error_message': s.error_message or '',
             'has_processed_file': bool(s.processed_file),
             'has_rejected_file': bool(s.rejected_file),

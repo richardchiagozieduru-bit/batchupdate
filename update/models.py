@@ -44,6 +44,7 @@ class UploadSession(models.Model):
         'acctmgt.Subscriber', on_delete=models.SET_NULL, null=True, blank=True, related_name='sessions'
     )
     upload_to_db = models.BooleanField(default=False)
+    content_fingerprint = models.CharField(max_length=64, blank=True, db_index=True)
     
     class Meta:
         ordering = ['-uploaded_at']
@@ -118,4 +119,31 @@ class DroppedFile(models.Model):
         elif bytes_val >= 1024:
             return f"{bytes_val / 1024:.1f} KB"
         return f"{bytes_val} B"
+
+
+class ImplementedArtifact(models.Model):
+    """
+    Durable registry of datasets that have been stream-uploaded to BatchUpdate SQL Server.
+    Survives the 30-day session retention cleanup to enforce global duplicate detection.
+    """
+    content_fingerprint = models.CharField(max_length=64, db_index=True, unique=True)
+    table_name = models.CharField(max_length=64)
+    subscriber = models.ForeignKey(
+        'acctmgt.Subscriber', on_delete=models.SET_NULL, null=True, blank=True, related_name='implemented_artifacts'
+    )
+    rows_uploaded = models.IntegerField(default=0)
+    implemented_at = models.DateTimeField(auto_now_add=True)
+    implemented_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name='implemented_artifacts'
+    )
+    source_session = models.ForeignKey(
+        UploadSession, on_delete=models.SET_NULL, null=True, blank=True, related_name='implemented_artifacts'
+    )
+    is_historical_backfill = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['-implemented_at']
+
+    def __str__(self):
+        return f"[{self.table_name}] ({self.rows_uploaded:,} rows) - {self.implemented_at.strftime('%Y-%m-%d')}"
 
