@@ -28,7 +28,7 @@ from .models import UploadSession, ColumnMapping, MappingTemplate, Subscriber, D
 from .columns import TARGET_COLUMN_CHOICES, HEADER_MAPPING_DICTIONARY, DISPLAY_HEADERS
 from .services import (
     clean_dataframe,
-    calculate_file_hash, read_uploaded_file, read_excel_file,
+    read_uploaded_file, read_excel_file,
     MAX_EXCEL_FILE_SIZE_MB, MAX_CSV_FILE_SIZE_MB,
     get_excel_sheet_names, read_uploaded_file_sheet,
     generate_sql_script, upload_raw_to_batchupdate,
@@ -489,34 +489,6 @@ def _handle_free_upload(request, excel_files, template_signatures, file_password
                 upload_to_db=upload_to_db,
             )
             file_path = session.original_file.path
-
-            # Duplicate detection (check against previous non-error sessions)
-            is_duplicate = False
-            try:
-                file_hash = calculate_file_hash(file_path)
-                existing = UploadSession.objects.filter(
-                    user=request.user
-                ).exclude(batch_id=batch_id).exclude(id=session.id).exclude(status='error').order_by('-uploaded_at')[:50]
-                for existing_session in existing:
-                    if existing_session.original_file and os.path.exists(existing_session.original_file.path):
-                        if file_hash == calculate_file_hash(existing_session.original_file.path):
-                            is_duplicate = True
-                            break
-            except Exception:
-                logger.warning("Duplicate detection failed", exc_info=True)
-
-            if is_duplicate:
-                has_specific_message = True
-                try:
-                    session.original_file.delete(save=False)
-                    session.delete()
-                except Exception:
-                    pass
-                messages.error(
-                    request,
-                    f'Upload blocked: "{f.name}" has already been uploaded previously. Kindly check the filename and re-upload.'
-                )
-                continue
 
             # Detect sheets
             try:
