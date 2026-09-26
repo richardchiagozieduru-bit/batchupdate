@@ -34,7 +34,7 @@ from .services import (
     generate_sql_script, upload_raw_to_batchupdate,
     detect_header_row, build_sheet_name, get_subscribers_from_batchupdate,
     extract_sub_id, write_parquet_as_excel, is_sheet_usable,
-    get_subscriber_historical_targets,
+    get_subscriber_historical_targets, get_file_headers,
 )
 from acctmgt.utils import (
     is_external as _is_external,
@@ -739,7 +739,7 @@ def _handle_free_upload(request, excel_files, template_signatures, file_password
                 hrow = detect_header_row(file_path, template_signatures=template_signatures)
                 temp_session.header_row = hrow
                 temp_session.save()
-                df = read_uploaded_file(file_path, header=hrow)
+                df = read_uploaded_file(file_path, header=hrow, nrows=0)  # headers only — data loaded in task
                 auto_map_res = _try_auto_map(request, temp_session, df)
                 if auto_map_res.get('is_complete'):
                     temp_session.status = 'processing'
@@ -1015,8 +1015,7 @@ def mapping_view(request, session_id):
     session = get_object_or_404(UploadSession, id=session_id, user=request.user)
     
     try:
-        df = read_uploaded_file(session.original_file.path, header=session.header_row)
-        headers = list(df.columns)
+        headers = get_file_headers(session.original_file.path, header_row=session.header_row)
     except Exception as e:
         messages.error(request, f'Error reading file: {str(e)}')
         return redirect('upload')
@@ -1800,8 +1799,7 @@ def batch_mapping_view(request, batch_id):
             continue
 
         try:
-            df = read_uploaded_file(session.original_file.path)
-            headers = list(df.columns)
+            headers = get_file_headers(session.original_file.path, header_row=session.header_row)
         except Exception as e:
             sheets_data.append({
                 'session': session,

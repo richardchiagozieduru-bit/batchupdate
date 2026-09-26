@@ -1740,6 +1740,78 @@ class BuildSheetNameTests(TestCase):
         self.assertLessEqual(len(sheet_name_indexed), 31)
 
 
+class GetFileHeadersTests(TestCase):
+    def test_get_file_headers_csv_row_0(self):
+        import tempfile
+        from update.services import get_file_headers
+        with tempfile.NamedTemporaryFile('w', suffix='.csv', delete=False) as f:
+            f.write("AccountNo,Balance,Arrears\n12345,100,0\n67890,200,1\n")
+            f_path = f.name
+        try:
+            headers = get_file_headers(f_path, header_row=0)
+            self.assertEqual(headers, ['AccountNo', 'Balance', 'Arrears'])
+        finally:
+            import os
+            if os.path.exists(f_path):
+                os.remove(f_path)
+
+    def test_get_file_headers_csv_with_offset(self):
+        import tempfile
+        from update.services import get_file_headers
+        with tempfile.NamedTemporaryFile('w', suffix='.csv', delete=False) as f:
+            f.write("Title: Monthly Report\nGenerated: 2026-09-25\nAccountNo,Balance,Arrears\n12345,100,0\n")
+            f_path = f.name
+        try:
+            headers = get_file_headers(f_path, header_row=2)
+            self.assertEqual(headers, ['AccountNo', 'Balance', 'Arrears'])
+        finally:
+            import os
+            if os.path.exists(f_path):
+                os.remove(f_path)
+
+    def test_get_file_headers_xlsx_row_0(self):
+        import tempfile
+        from openpyxl import Workbook
+        from update.services import get_file_headers
+        wb = Workbook()
+        ws = wb.active
+        ws.append(['AccountNo', 'Balance', 'Classification'])
+        ws.append(['00123', 5000, 'Performing'])
+        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as f:
+            f_path = f.name
+        wb.save(f_path)
+        wb.close()
+        try:
+            headers = get_file_headers(f_path, header_row=0)
+            self.assertEqual(headers, ['AccountNo', 'Balance', 'Classification'])
+        finally:
+            import os
+            if os.path.exists(f_path):
+                os.remove(f_path)
+
+    def test_get_file_headers_xlsx_with_offset(self):
+        import tempfile
+        from openpyxl import Workbook
+        from update.services import get_file_headers
+        wb = Workbook()
+        ws = wb.active
+        ws.append(['Report Title: Credit Ingestion'])
+        ws.append([])
+        ws.append(['AccountNo', 'Balance', 'Classification'])
+        ws.append(['00123', 5000, 'Performing'])
+        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as f:
+            f_path = f.name
+        wb.save(f_path)
+        wb.close()
+        try:
+            headers = get_file_headers(f_path, header_row=2)
+            self.assertEqual(headers, ['AccountNo', 'Balance', 'Classification'])
+        finally:
+            import os
+            if os.path.exists(f_path):
+                os.remove(f_path)
+
+
 
 
 

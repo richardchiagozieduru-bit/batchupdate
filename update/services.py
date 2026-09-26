@@ -258,6 +258,44 @@ def read_uploaded_file(file_path, header=0, nrows=None):
                 return pd.read_excel(file_path, engine='xlrd', **kw)
 
 
+def get_file_headers(file_path, header_row=0, sheet_name=None):
+    """
+    Extract only the column header names from a file with zero row overhead.
+    Does not load file data rows into memory.
+
+    Args:
+        file_path:  Path to CSV or Excel file
+        header_row: 0-based row index where headers are located
+        sheet_name: Specific sheet name (optional, defaults to active sheet)
+
+    Returns:
+        list of str: List of column header names
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == '.csv':
+        df = pd.read_csv(file_path, header=header_row, nrows=0, dtype=str)
+        return [str(c).strip() for c in df.columns]
+    elif ext == '.xlsx':
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+            try:
+                wb = load_workbook(file_path, read_only=True, data_only=True)
+            except Exception:
+                df = read_uploaded_file(file_path, header=header_row, nrows=0)
+                return [str(c).strip() for c in df.columns]
+            try:
+                ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+                header_row_1 = header_row + 1
+                for row in ws.iter_rows(min_row=header_row_1, max_row=header_row_1, values_only=True):
+                    return [str(c).strip() for c in row if c is not None and str(c).strip() != '']
+                return []
+            finally:
+                wb.close()
+    else:
+        df = read_uploaded_file(file_path, header=header_row, nrows=0)
+        return [str(c).strip() for c in df.columns]
+
+
 def _zero_mask_width(number_format):
     """
     Return the number of '0' placeholders in a zero-mask number format, or None.
